@@ -151,7 +151,7 @@ graph LR
 
 | Librairie | Usage |
 |---|---|
-| `PyQt6` (ou `PySide6`) | Framework GUI principal |
+| `PyQt6` | Framework GUI principal |
 | `PyQt6.QtWidgets` | Composants d'interface (fenêtres, boutons, menus) |
 | `PyQt6.QtCore` | Signaux/Slots, QThread, timers |
 | `PyQt6.QtGui` | Graphismes, polices, couleurs |
