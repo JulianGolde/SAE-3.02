@@ -6,7 +6,7 @@
 
 ---
 
-### 📋 Identification
+###  Identification
 
 | Information | Détail |
 |---|---|
@@ -17,7 +17,7 @@
 
 ---
 
-### 🚀 Installation
+###  Installation
 
 #### Prérequis
 - Python 3.14+ installé ([python.org](https://www.python.org/downloads/))
