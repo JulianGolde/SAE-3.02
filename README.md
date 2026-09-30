@@ -221,15 +221,15 @@ graph LR
 | ID | Fonctionnalité | Priorité (MoSCoW) | Complexité (1-5) | Coût humain estimé (h) |
 |---|---|---|---|---|
 | **EF-01** | **Affichage 2D du carrefour** — Vue graphique avec voies, feux tricolores, passages piétons via `QGraphicsScene` / `QGraphicsView` | **Must have** | 4 | 20h |
-| **EF-02** | **Simulation de véhicules standards** — Circulation en respectant intégralement le code de la route (conduite parfaite) | **Must have** | 3 | 15h |
-| **EF-03** | **Véhicules prioritaires** — Véhicules de secours identifiables visuellement, avec comportement de priorité | **Must have** | 3 | 12h |
-| **EF-04** | **Régulation dynamique des feux** — Changement automatique des feux au profit du véhicule prioritaire en approche (V2I) | **Must have** | 4 | 18h |
-| **EF-05** | **Communication réseau (sockets)** — Échange de trames entre entités (véhicule → carrefour → centre de contrôle) via TCP/UDP | **Must have** | 5 | 25h |
-| **EF-06** | **Chargement de scénarios** — L'opérateur peut charger et paramétrer des scénarios (densité trafic, piétons, urgences) | **Must have** | 3 | 10h |
-| **EF-07** | **Gestion robuste des erreurs** — Gestion des exceptions réseau, IHM, simulation. Aucun crash non géré. | **Must have** | 3 | 10h |
+| **EF-02** | **Simulation de véhicules standards** — Circulation en respectant intégralement le code de la route (conduite parfaite) | **Must have** | 3 | 5h |
+| **EF-03** | **Véhicules prioritaires** — Véhicules de secours identifiables visuellement, avec comportement de priorité | **Must have** | 3 | 5h |
+| **EF-04** | **Régulation dynamique des feux** — Changement automatique des feux au profit du véhicule prioritaire en approche (V2I) | **Must have** | 4 | 5h |
+| **EF-05** | **Communication réseau (sockets)** — Échange de trames entre entités (véhicule → carrefour → centre de contrôle) via TCP/UDP | **Must have** | 5 | 10h |
+| **EF-06** | **Chargement de scénarios** — L'opérateur peut charger et paramétrer des scénarios (densité trafic, piétons, urgences) | **Must have** | 3 | 15h |
+| **EF-07** | **Gestion robuste des erreurs** — Gestion des exceptions réseau, IHM, simulation. Aucun crash non géré. | **Must have** | 3 | 5h |
 | **EF-08** | **Comportement piétons** — Piétons aux passages protégés avec densité paramétrable | **Should have** | 3 | 12h |
 | **EF-09** | **Collecte de métriques en BDD** — Enregistrement sqlite3 : temps de passage, délais, incidents | **Must have** | 3 | 10h |
-| **EF-10** | **Visualisation statistique** — Graphiques intégrés (matplotlib/pyqtgraph) : histogrammes, courbes de performance | **Should have** | 3 | 12h |
+| **EF-10** | **Visualisation statistique** — Graphiques intégrés (matplotlib/pyqtgraph) : histogrammes, courbes de performance | **Should have** | 3 | 15h |
 | **EF-11** | **Tableau de bord opérateur** — Vue synthétique des KPIs en temps réel pendant la simulation | **Should have** | 4 | 15h |
 | **EF-12** | **Historique des simulations** — Consultation et comparaison des résultats passés depuis la BDD | **Could have** | 2 | 6h |
 | **EF-13** | **Export des résultats** — Export CSV/PDF des métriques et graphiques | **Could have** | 2 | 5h |
