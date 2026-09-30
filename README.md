@@ -234,7 +234,7 @@ graph LR
 | **EF-12** | **Historique des simulations** — Consultation et comparaison des résultats passés depuis la BDD | **Could have** | 2 | 6h |
 | **EF-13** | **Export des résultats** — Export CSV/PDF des métriques et graphiques | **Could have** | 2 | 5h |
 | **EF-14** | **Multi-carrefour en cascade** — Gestion de plusieurs carrefours interconnectés | **Won't have (V2)** | 5 | 30h+ |
-| | | | **Total estimé** | **≈ 170h** |
+| | | | **Total estimé** | **≈ 128h** |
 
 ### 3.2 Exigences non-fonctionnelles
 
