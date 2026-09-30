@@ -188,7 +188,7 @@ graph LR
 |---|---|
 | `sqlite3` | Stockage local des métriques, statistiques, historiques |
 | `math`, `random`, `time`, `datetime` | Calculs de simulation |
-| `matplotlib` ou `pyqtgraph` | Graphiques statistiques intégrés à l'IHM |
+|  `pyqtgraph` | Graphiques statistiques intégrés à l'IHM |
 
 ### 2.4 Environnement de développement
 
@@ -196,7 +196,7 @@ graph LR
 |---|---|
 | **IDE** | Visual Studio Code (avec extensions Python + Pylance) |
 | **Environnement virtuel** | `venv` (module standard Python) |
-| **Gestion des dépendances** | `requirements.txt` à la racine avec versions exactes (ex: `PyQt6==6.7.1`) |
+| **Gestion des dépendances** | Versions exactes du requirements.txt créé (PyQt6==6.11.0, pyqtgraph==0.14.0, numpy==2.2.6) |
 | **Gestionnaire de version** | Git / GitHub (dépôt public) |
 
 > ⚠️ **Critère éliminatoire** : Toute librairie absente du `requirements.txt`
