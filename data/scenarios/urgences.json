@@ -1,0 +1,7 @@
+[
+    {"id": "vta_1", "type": "VIG_VTA", "pos_x": -80.0, "pos_y": 2.0, "cap": 0.0, "vitesse": 22.0},
+    {"id": "voiture_1", "type": "VOITURE", "pos_x": -30.0, "pos_y": 2.0, "cap": 0.0, "vitesse": 10.0},
+    {"id": "voiture_2", "type": "VOITURE", "pos_x": -10.0, "pos_y": 2.0, "cap": 0.0, "vitesse": 0.0},
+    {"id": "voiture_3", "type": "VOITURE", "pos_x": 2.0, "pos_y": 40.0, "cap": -1.5708, "vitesse": 13.0},
+    {"id": "voiture_4", "type": "VOITURE", "pos_x": -2.0, "pos_y": -40.0, "cap": 1.5708, "vitesse": 13.0}
+]

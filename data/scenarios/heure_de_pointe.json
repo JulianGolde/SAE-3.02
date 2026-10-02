@@ -1,0 +1,9 @@
+[
+    {"id": "voiture_1", "type": "VOITURE", "pos_x": -60.0, "pos_y": 2.0, "cap": 0.0, "vitesse": 13.0},
+    {"id": "voiture_2", "type": "VOITURE", "pos_x": -30.0, "pos_y": 2.0, "cap": 0.0, "vitesse": 13.0},
+    {"id": "voiture_3", "type": "VOITURE", "pos_x": 40.0, "pos_y": -2.0, "cap": 3.14159, "vitesse": 13.0},
+    {"id": "voiture_4", "type": "VOITURE", "pos_x": 80.0, "pos_y": -2.0, "cap": 3.14159, "vitesse": 13.0},
+    {"id": "camion_1", "type": "POIDS_LOURD", "pos_x": 2.0, "pos_y": 50.0, "cap": -1.5708, "vitesse": 8.0},
+    {"id": "velo_1", "type": "CYCLISTE", "pos_x": 2.0, "pos_y": 30.0, "cap": -1.5708, "vitesse": 5.0},
+    {"id": "pieton_1", "type": "PIETON", "pos_x": -15.0, "pos_y": 15.0, "cap": 0.0, "vitesse": 1.5}
+]

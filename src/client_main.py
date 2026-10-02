@@ -4,30 +4,64 @@ import math
 import json
 import os
 from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QGraphicsView
-from PyQt6.QtGui import QPainter, QIcon, QPixmap, QColor
+from PyQt6.QtGui import QPainter, QIcon, QPixmap, QColor, QPen, QLinearGradient
 from PyQt6.QtCore import Qt
 
 from gui.carrefour_scene import CarrefourScene
 from gui.dashboard import DashboardPanel
 from simulation.moteur import MoteurSimulation
 from simulation.vehicules import Vehicule, TypeVehicule
+from network.client_node import ClientNode
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        self.setWindowTitle("Esk-2718 — Simulation Totale VPI/VPO")
+        self.setWindowTitle("Esk-2718 — Simulation Totale VPI/VPO (CLIENT)")
         self.setMinimumSize(1300, 850)
         self.id_selectionne = None
         self.type_a_placer = None 
         
-        icon_pixmap = QPixmap(64, 64)
-        icon_pixmap.fill(QColor("#4CAF50"))
+        icon_pixmap = QPixmap(256, 256)
+        icon_pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(icon_pixmap)
-        painter.setBrush(QColor("#333"))
-        painter.drawRect(24, 0, 16, 64)
-        painter.drawRect(0, 24, 64, 16)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Background: rounded rect (dark gray road)
+        road_gradient = QLinearGradient(0, 0, 256, 256)
+        road_gradient.setColorAt(0.0, QColor("#3a3a3a"))
+        road_gradient.setColorAt(1.0, QColor("#1f1f1f"))
+        painter.setBrush(road_gradient)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(16, 16, 224, 224, 32, 32)
+        
+        # Intersection lines
+        painter.setPen(QPen(QColor("#ffffff"), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(128, 16, 128, 96)
+        painter.drawLine(128, 160, 128, 240)
+        painter.drawLine(16, 128, 96, 128)
+        painter.drawLine(160, 128, 240, 128)
+        
+        # Traffic light body
+        painter.setBrush(QColor("#222222"))
+        painter.setPen(QPen(QColor("#555555"), 4))
+        painter.drawRoundedRect(96, 64, 64, 128, 16, 16)
+        
+        # Lights
+        painter.setPen(Qt.PenStyle.NoPen)
+        # Red
         painter.setBrush(QColor("#F44336"))
-        painter.drawEllipse(28, 28, 8, 8)
+        painter.drawEllipse(112, 76, 32, 32)
+        # Green
+        painter.setBrush(QColor("#4CAF50"))
+        painter.drawEllipse(112, 148, 32, 32)
+        
+        # Gloss effect
+        gloss = QLinearGradient(96, 64, 160, 192)
+        gloss.setColorAt(0.0, QColor(255, 255, 255, 40))
+        gloss.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(gloss)
+        painter.drawRoundedRect(96, 64, 64, 128, 16, 16)
+        
         painter.end()
         self.setWindowIcon(QIcon(icon_pixmap))
 
@@ -47,6 +81,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.dashboard)
 
         self.moteur = MoteurSimulation()
+        
+        # Start networking
+        try:
+            self.client_node = ClientNode(config, self.moteur)
+            self.moteur.network_client = self.client_node
+            self.client_node.start()
+        except Exception as e:
+            print(f"Network initialization error: {e}")
+            self.client_node = None
+            self.moteur.network_client = None
         
         def rafraichir_interface(entites, inter):
             self.scene.mettre_a_jour_entites(entites, inter)
@@ -78,8 +122,8 @@ class MainWindow(QMainWindow):
             self.dashboard.lbl_temps_valeur.setText(f"{val/10.0:.1f}x")
             
         self.dashboard.slider_temps.valueChanged.connect(change_vitesse)
-        self.dashboard.btn_feux_ns.clicked.connect(self.moteur.intersection.forcer_vert_ns)
-        self.dashboard.btn_feux_eo.clicked.connect(self.moteur.intersection.forcer_vert_eo)
+        # Note: the buttons on the dashboard to force traffic lights should ideally send a command to the server.
+        # But we will leave them local (they will be overridden by the server immediately) or disable them.
         
         def change_meteo(etat):
             self.scene.set_meteo(etat)
@@ -112,9 +156,14 @@ class MainWindow(QMainWindow):
                 voie = self.dashboard.combo_voie_spawn.currentText()
                 
                 if voie == "Passage Piéton" or self.type_a_placer == TypeVehicule.PIETON:
-                    nouvelle.pos_x = x
-                    nouvelle.pos_y = y
-                    nouvelle.cap = math.pi/2 if y < 0 else -math.pi/2
+                    if abs(x) > abs(y):
+                        nouvelle.pos_x = 9.0 if x > 0 else -9.0
+                        nouvelle.pos_y = max(-4.0, min(4.0, y))
+                        nouvelle.cap = math.pi/2 if y < 0 else -math.pi/2
+                    else:
+                        nouvelle.pos_x = max(-4.0, min(4.0, x))
+                        nouvelle.pos_y = 9.0 if y > 0 else -9.0
+                        nouvelle.cap = 0.0 if x < 0 else math.pi
                 elif voie == "Nord -> Sud":
                     nouvelle.pos_x = -2.0
                     nouvelle.pos_y = y
@@ -138,7 +187,7 @@ class MainWindow(QMainWindow):
                         nouvelle.cap = 0.0 if nouvelle.pos_y > 0 else math.pi
                     else:
                         nouvelle.pos_y = y
-                        nouvelle.pos_x = 2.0 if x < 0 else -2.0
+                        nouvelle.pos_x = 2.0 if x > 0 else -2.0
                         nouvelle.cap = math.pi/2 if nouvelle.pos_x < 0 else -math.pi/2
                     
                 nouvelle.vitesse = 0.0
@@ -199,11 +248,19 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if hasattr(self, 'moteur') and self.moteur.isRunning(): self.moteur.arreter()
+        if hasattr(self, 'client_node') and self.client_node is not None: self.client_node.stop()
         event.accept()
 
 if __name__ == "__main__":
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+    except Exception:
+        config = {}
+        
     app = QApplication(sys.argv)
-    app.setApplicationName("Esk-2718")
-    w = MainWindow()
-    w.show()
+    app.setApplicationName("Esk-2718 Client")
+    w = MainWindow(config)
+    w.showMaximized()
     sys.exit(app.exec())
