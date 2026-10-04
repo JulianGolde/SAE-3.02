@@ -1,10 +1,20 @@
+import logging
+logger = logging.getLogger(__name__)
+
 import socket
 import json
-import threading
 import select
 import time
+import queue
 
-class ClientNode(threading.Thread):
+from PyQt6.QtCore import QThread, pyqtSignal
+
+class ClientNode(QThread):
+    """Nœud client pour la communication réseau."""
+    
+    # Signal pour mettre à jour l'état de l'intersection de manière thread-safe
+    etat_intersection_recu = pyqtSignal(int, int)
+
     def __init__(self, config, moteur):
         super().__init__()
         self.config = config
@@ -27,41 +37,60 @@ class ClientNode(threading.Thread):
         self.vta_active = False
         self.last_vta_sent = 0
         self.tcp_buffer = ""
+        
+        # File d'attente pour les messages sortants (thread-safe)
+        self.msg_queue = queue.Queue()
 
-    def connect(self):
+    def connect_server(self):
         try:
             if self.tcp_sock:
                 self.tcp_sock.close()
             self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.tcp_sock.connect((self.server_ip, self.server_tcp_port))
             self.connected = True
-            print("[ClientNode] Connected to Server via TCP.")
+            logger.info("[ClientNode] Connected to Server via TCP.")
         except Exception as e:
             self.connected = False
-            print(f"[ClientNode] Error connecting TCP: {e}")
+            logger.error(f"[ClientNode] Error connecting TCP: {e}")
 
     def run(self):
         self.running = True
-        self.connect()
+        self.connect_server()
         last_reconnect = time.time()
+        
         while self.running:
             try:
                 now = time.time()
-                if not self.connected and (now - last_reconnect > 1.0):
+                if not self.connected and (now - last_reconnect > 2.0):
                     last_reconnect = now
-                    self.connect()
+                    self.connect_server()
+
+                # Traitement de la file d'attente des messages sortants
+                while not self.msg_queue.empty():
+                    msg_type, msg_data = self.msg_queue.get()
+                    if msg_type == "UDP":
+                        try:
+                            self.udp_sock.sendto(msg_data, (self.server_ip, self.server_udp_port))
+                        except Exception as e:
+                            logger.error(f"UDP send error: {e}")
+                    elif msg_type == "TCP" and self.connected and self.tcp_sock:
+                        try:
+                            self.tcp_sock.sendall(msg_data)
+                        except Exception as e:
+                            logger.error(f"TCP send error: {e}")
+                            self.connected = False
 
                 sockets = [self.udp_sock]
                 if self.connected and self.tcp_sock:
                     sockets.append(self.tcp_sock)
 
-                readable, _, _ = select.select(sockets, [], [], 0.1)
+                readable, _, _ = select.select(sockets, [], [], 0.05)
                 for sock in readable:
                     if sock is self.tcp_sock:
                         try:
-                            data = sock.recv(1024)
+                            data = sock.recv(2048)
                             if not data:
-                                print("[ClientNode] Disconnected from server.")
+                                logger.info("[ClientNode] Disconnected from server.")
                                 self.connected = False
                                 break
                             self.tcp_buffer += data.decode('utf-8')
@@ -71,19 +100,21 @@ class ClientNode(threading.Thread):
                                     try:
                                         payload = json.loads(msg)
                                         self._handle_msg(payload)
-                                    except Exception:
-                                        pass
-                        except Exception:
+                                    except Exception as e:
+                                        logger.warning(f"JSON decode error: {e}")
+                        except Exception as e:
+                            logger.error(f"TCP recv error: {e}")
                             self.connected = False
                             break
                     elif sock is self.udp_sock:
-                        data, addr = sock.recvfrom(1024)
+                        data, addr = sock.recvfrom(2048)
                         try:
                             payload = json.loads(data.decode('utf-8'))
                             self._handle_msg(payload)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"UDP JSON decode error: {e}")
             except Exception as e:
+                logger.error(f"Client run error: {e}", exc_info=True)
                 self.connected = False
                 if self.tcp_sock:
                     try:
@@ -91,44 +122,36 @@ class ClientNode(threading.Thread):
                     except Exception:
                         pass
                     self.tcp_sock = None
-                time.sleep(0.1)
+                time.sleep(0.5)
 
     def _handle_msg(self, payload):
         if payload.get("type") in ("state", "ack"):
             feu_ns = payload.get("feu_ns", 3)
             feu_eo = payload.get("feu_eo", 3)
-            self.moteur.intersection.set_state(feu_ns, feu_eo)
+            # Utilisation du signal QThread
+            self.etat_intersection_recu.emit(feu_ns, feu_eo)
 
     def send_vta_alert(self, axe_x):
         now = time.time()
-        # Resend UDP packet every 200ms to combat packet drop
         if not self.vta_active or (now - self.last_vta_sent > 0.2):
             self.vta_active = True
             self.last_vta_sent = now
             msg = json.dumps({"type": "vta_alert", "axe_x": axe_x})
-            try:
-                self.udp_sock.sendto(msg.encode('utf-8'), (self.server_ip, self.server_udp_port))
-            except Exception:
-                pass
+            self.msg_queue.put(("UDP", msg.encode('utf-8')))
 
     def send_vta_end(self):
         if self.vta_active:
             self.vta_active = False
             msg = json.dumps({"type": "vta_end"})
-            try:
-                for _ in range(3): # Redundancy for UDP drop
-                    self.udp_sock.sendto(msg.encode('utf-8'), (self.server_ip, self.server_udp_port))
-            except Exception:
-                pass
+            # Redundancy for UDP drop
+            for _ in range(3):
+                self.msg_queue.put(("UDP", msg.encode('utf-8')))
 
     def send_metrics(self, count, avg_speed):
         if not self.connected:
             return
         msg = json.dumps({"type": "metrics", "count": count, "avg_speed": avg_speed}) + "\n"
-        try:
-            self.tcp_sock.send(msg.encode('utf-8'))
-        except Exception:
-            self.connected = False
+        self.msg_queue.put(("TCP", msg.encode('utf-8')))
 
     def stop(self):
         self.running = False

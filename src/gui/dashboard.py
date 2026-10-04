@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QPushButton, 
     QLabel, QFormLayout, QComboBox, QSlider, QTextEdit, QHBoxLayout
@@ -5,7 +8,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 class DashboardPanel(QWidget):
+    """Panneau latéral contenant les contrôles de la simulation."""
     def __init__(self, parent=None):
+        """Initialise l'objet avec les paramètres requis.
+        
+        Args:
+            *args: Arguments divers.
+            **kwargs: Paramètres nommés.
+        """
         super().__init__(parent)
         self.setFixedWidth(340)
         
@@ -99,8 +109,38 @@ class DashboardPanel(QWidget):
         controls_layout.addWidget(self.btn_toggle_sim)
         controls_group.setLayout(controls_layout)
         
+        stats_group = QGroupBox("📊 Analyse de Données")
+        stats_layout = QFormLayout()
+        self.lbl_veh_count = QLabel("0")
+        self.lbl_avg_speed = QLabel("0.0 km/h")
+        stats_layout.addRow("Véhicules Actifs :", self.lbl_veh_count)
+        stats_layout.addRow("Vitesse Moyenne :", self.lbl_avg_speed)
+        stats_group.setLayout(stats_layout)
+        
         layout.addWidget(env_group)
         layout.addWidget(feux_group)
         layout.addWidget(hud_group)
         layout.addWidget(controls_group)
+        layout.addWidget(stats_group)
         layout.addStretch()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not hasattr(self, '_connected_stats'):
+            p = self.parent()
+            while p is not None:
+                if hasattr(p, 'moteur') and hasattr(p.moteur, 'tick_simulation'):
+                    p.moteur.tick_simulation.connect(self.update_from_tick)
+                    self._connected_stats = True
+                    break
+                p = p.parent()
+
+    def update_from_tick(self, entites, inter):
+        try:
+            nb = len(entites)
+            s = sum(e.vitesse_kmh for e in entites if hasattr(e, 'vitesse_kmh'))
+            avg = s / nb if nb > 0 else 0.0
+            self.lbl_veh_count.setText(str(nb))
+            self.lbl_avg_speed.setText(f"{avg:.1f} km/h")
+        except Exception as e:
+            logger.error(f"Erreur update_from_tick: {e}")

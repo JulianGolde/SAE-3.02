@@ -1,0 +1,361 @@
+import sys
+import uuid
+import math
+import json
+import os
+from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QGraphicsView, QLabel
+from PyQt6.QtGui import QPainter, QIcon, QPixmap, QColor, QPen, QLinearGradient, QFont
+from PyQt6.QtCore import Qt
+
+from gui.carrefour_scene import CarrefourScene
+from gui.dashboard import DashboardPanel
+from simulation.moteur import MoteurSimulation
+from simulation.vehicules import Vehicule, TypeVehicule
+from network.client_node import ClientNode
+
+
+class MainWindow(QMainWindow):
+    """
+    Fenêtre principale du client de simulation.
+    Contient la vue graphique (CarrefourScene) et le panneau de contrôle (DashboardPanel).
+    Gère les interactions utilisateur, les raccourcis clavier et l'état de la simulation.
+    """
+    def __init__(self, config):
+        """
+        Initialise la fenêtre, l'interface graphique et le moteur de simulation.
+        
+        Args:
+            config (dict): La configuration chargée (ex: adresse du serveur, port).
+        """
+        super().__init__()
+        self.setWindowTitle("Esk-2718 — Simulation Totale VPI/VPO (CLIENT)")
+        self.setMinimumSize(1300, 850)
+        self.id_selectionne = None
+        self.type_a_placer = None 
+        
+        # --- 1. Création de l'icône de la fenêtre ---
+        icon_pixmap = QPixmap(256, 256)
+        icon_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(icon_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Fond : route sombre
+        road_gradient = QLinearGradient(0, 0, 256, 256)
+        road_gradient.setColorAt(0.0, QColor("#3a3a3a"))
+        road_gradient.setColorAt(1.0, QColor("#1f1f1f"))
+        painter.setBrush(road_gradient)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(16, 16, 224, 224, 32, 32)
+        
+        # Lignes d'intersection
+        painter.setPen(QPen(QColor("#ffffff"), 12, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(128, 16, 128, 96)
+        painter.drawLine(128, 160, 128, 240)
+        painter.drawLine(16, 128, 96, 128)
+        painter.drawLine(160, 128, 240, 128)
+        
+        # Corps du feu tricolore
+        painter.setBrush(QColor("#222222"))
+        painter.setPen(QPen(QColor("#555555"), 4))
+        painter.drawRoundedRect(96, 64, 64, 128, 16, 16)
+        
+        # Lumières (Rouge et Vert)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#F44336"))
+        painter.drawEllipse(112, 76, 32, 32)
+        painter.setBrush(QColor("#4CAF50"))
+        painter.drawEllipse(112, 148, 32, 32)
+        
+        # Effet de brillance
+        gloss = QLinearGradient(96, 64, 160, 192)
+        gloss.setColorAt(0.0, QColor(255, 255, 255, 40))
+        gloss.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setBrush(gloss)
+        painter.drawRoundedRect(96, 64, 64, 128, 16, 16)
+        
+        painter.end()
+        
+        # On définit l'icône de l'application et de la fenêtre
+        QApplication.setWindowIcon(QIcon(icon_pixmap))
+        self.setWindowIcon(QIcon(icon_pixmap))
+
+        # --- 2. Mise en place de l'interface ---
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.scene = CarrefourScene(self)
+        self.view = QGraphicsView(self.scene)
+        self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        
+        # Activation du suivi de la souris pour l'indicateur fantôme
+        self.view.setMouseTracking(True)
+        
+        self.dashboard = DashboardPanel(self)
+
+        # Indicateur de PAUSE superposé à la vue
+        self.pause_overlay = QLabel("PAUSE", self.view)
+        self.pause_overlay.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 152, 0, 200);
+                background-color: rgba(0, 0, 0, 100);
+                border-radius: 10px;
+                padding: 10px 30px;
+            }
+        """)
+        font = QFont("Arial", 48, QFont.Weight.Bold)
+        self.pause_overlay.setFont(font)
+        self.pause_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pause_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        layout.addWidget(self.view, stretch=1)
+        layout.addWidget(self.dashboard)
+
+        # --- 3. Initialisation du moteur et du réseau ---
+        self.moteur = MoteurSimulation()
+        
+        try:
+            self.client_node = ClientNode(config, self.moteur)
+            self.moteur.network_client = self.client_node
+            self.client_node.start()
+        except Exception as e:
+            print(f"Erreur d'initialisation réseau: {e}")
+            self.client_node = None
+            self.moteur.network_client = None
+        
+        # Connecte le signal du moteur pour rafraîchir l'interface
+        def rafraichir_interface(entites, inter):
+            self.scene.mettre_a_jour_entites(entites, inter)
+            if self.id_selectionne:
+                entite = next((e for e in entites if e.id_entite == self.id_selectionne), None)
+                if entite:
+                    ec = 0.5 * entite.masse_kg * (entite.vitesse**2)
+                    texte = f"ID: {entite.id_entite} | {entite.type_entite.name}\n"
+                    texte += f"Vitesse: {entite.vitesse_kmh:.1f} km/h\n"
+                    texte += f"Masse: {entite.masse_kg:.1f} kg\n"
+                    texte += f"Énergie Cinétique: {ec/1000:.1f} kJ\n"
+                    if entite.freinage_mecanique:
+                        texte += f"Accél: {entite.commande_acceleration:.1f} m/s² [FREIN MÉC.]\n"
+                    else:
+                        texte += f"Accél: {entite.commande_acceleration:.1f} m/s² [frein mot.]\n"
+                    texte += f"ABS: {'Oui' if getattr(entite, 'possede_abs', True) else 'Non'}"
+                    texte += f" | Pneus: {getattr(entite, 'age_pneus', 0):.0f}ans ({getattr(entite, 'usure_pneus', 0)*100:.0f}%)\n"
+                    texte += f"Cap: {math.degrees(entite.cap):.0f}°"
+                    if getattr(entite, 'action_intersection', None) is not None:
+                        texte += f" [VIRAGE PRÉVU]"
+                    self.dashboard.text_hud.setText(texte)
+                else:
+                    self.dashboard.text_hud.setText("Entité perdue ou hors zone.")
+
+        self.moteur.tick_simulation.connect(rafraichir_interface)
+        
+        # --- 4. Connexions des signaux (Dashboard) ---
+        def change_vitesse(val):
+            self.moteur.multiplicateur_temps = val/10.0
+            self.dashboard.lbl_temps_valeur.setText(f"{val/10.0:.1f}x")
+            
+        self.dashboard.slider_temps.valueChanged.connect(change_vitesse)
+        
+        def change_meteo(etat):
+            self.scene.set_meteo(etat)
+            if etat == "Tempête": self.moteur.densite_air_rho = 2.5
+            elif etat == "Pluie": self.moteur.densite_air_rho = 1.5
+            else: self.moteur.densite_air_rho = 1.225
+                
+        self.dashboard.combo_meteo.currentTextChanged.connect(change_meteo)
+        
+        # Mettre à jour l'indicateur visuel si la voie de placement change
+        def change_voie(voie):
+            if self.type_a_placer is not None:
+                self.scene.set_fantome(self.type_a_placer, voie)
+                
+        self.dashboard.combo_voie_spawn.currentTextChanged.connect(change_voie)
+        
+        def toggle_simulation():
+            """Bascule l'état de la simulation (Démarrer/Pause)."""
+            if self.moteur.isRunning():
+                self.moteur.arreter()
+                self.dashboard.btn_toggle_sim.setText("▶️ Démarrer Simulation")
+                self.dashboard.btn_toggle_sim.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+                self.pause_overlay.show()
+            else:
+                self.moteur.demarrer()
+                self.dashboard.btn_toggle_sim.setText("⏸️ Mettre en Pause")
+                self.dashboard.btn_toggle_sim.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
+                self.pause_overlay.hide()
+                
+        self.dashboard.btn_toggle_sim.clicked.connect(toggle_simulation)
+        
+        def selectionner_entite(entite_id): 
+            self.id_selectionne = entite_id
+        self.scene.signal_entite_selectionnee.connect(selectionner_entite)
+        
+        def spawn_clic(x, y):
+            """Gère le clic sur la scène pour placer un véhicule."""
+            if self.type_a_placer is None:
+                return
+            try:
+                nouvelle = Vehicule(id_vehicule=str(uuid.uuid4())[:8], v_type=self.type_a_placer)
+                voie = self.dashboard.combo_voie_spawn.currentText()
+                
+                # Placement en fonction de la voie sélectionnée
+                if voie == "Passage Piéton" or self.type_a_placer == TypeVehicule.PIETON:
+                    if abs(x) > abs(y):
+                        nouvelle.pos_x = 9.0 if x > 0 else -9.0
+                        nouvelle.pos_y = max(-4.0, min(4.0, y))
+                        nouvelle.cap = math.pi/2 if y < 0 else -math.pi/2
+                    else:
+                        nouvelle.pos_x = max(-4.0, min(4.0, x))
+                        nouvelle.pos_y = 9.0 if y > 0 else -9.0
+                        nouvelle.cap = 0.0 if x < 0 else math.pi
+                elif voie == "Nord -> Sud":
+                    nouvelle.pos_x = -2.0
+                    nouvelle.pos_y = y
+                    nouvelle.cap = math.pi/2
+                elif voie == "Sud -> Nord":
+                    nouvelle.pos_x = 2.0
+                    nouvelle.pos_y = y
+                    nouvelle.cap = -math.pi/2
+                elif voie == "Est -> Ouest":
+                    nouvelle.pos_y = -2.0
+                    nouvelle.pos_x = x
+                    nouvelle.cap = math.pi
+                elif voie == "Ouest -> Est":
+                    nouvelle.pos_y = 2.0
+                    nouvelle.pos_x = x
+                    nouvelle.cap = 0.0
+                else:
+                    # Automatique (au plus proche)
+                    if abs(y) < abs(x):
+                        nouvelle.pos_x = x
+                        nouvelle.pos_y = 2.0 if y > 0 else -2.0
+                        nouvelle.cap = 0.0 if nouvelle.pos_y > 0 else math.pi
+                    else:
+                        nouvelle.pos_y = y
+                        nouvelle.pos_x = 2.0 if x > 0 else -2.0
+                        nouvelle.cap = math.pi/2 if nouvelle.pos_x < 0 else -math.pi/2
+                    
+                nouvelle.vitesse = 0.0
+                self.moteur.ajouter_entite(nouvelle)
+                
+                # Permet le placement multiple si Maj est enfoncé
+                modifiers = QApplication.keyboardModifiers()
+                if not (modifiers & Qt.KeyboardModifier.ShiftModifier):
+                    self.set_type_a_placer(None)
+                    
+            except Exception as e:
+                print(f"Erreur de placement : {e}")
+                
+        self.scene.signal_clic_vide.connect(spawn_clic)
+            
+        self.dashboard.btn_spawn_voiture.clicked.connect(lambda: self.set_type_a_placer(TypeVehicule.VOITURE))
+        self.dashboard.btn_spawn_pl.clicked.connect(lambda: self.set_type_a_placer(TypeVehicule.POIDS_LOURD))
+        self.dashboard.btn_spawn_vta.clicked.connect(lambda: self.set_type_a_placer(TypeVehicule.VIG_VTA))
+        self.dashboard.btn_spawn_pieton.clicked.connect(lambda: self.set_type_a_placer(TypeVehicule.PIETON))
+        self.dashboard.btn_spawn_cycliste.clicked.connect(lambda: self.set_type_a_placer(TypeVehicule.CYCLISTE))
+        
+        def prevoir_virage(angle):
+            """Affecte un virage programmé au véhicule sélectionné."""
+            if self.id_selectionne:
+                ent = next((e for e in self.moteur.entites if e.id_entite == self.id_selectionne), None)
+                if ent: 
+                    ent.action_intersection = angle
+                
+        self.dashboard.btn_dir_nord.clicked.connect(lambda: prevoir_virage(-math.pi/2))
+        self.dashboard.btn_dir_sud.clicked.connect(lambda: prevoir_virage(math.pi/2))
+        self.dashboard.btn_dir_est.clicked.connect(lambda: prevoir_virage(0.0))
+        self.dashboard.btn_dir_ouest.clicked.connect(lambda: prevoir_virage(math.pi))
+
+        def charger_scenario():
+            """Charge un scénario à partir d'un fichier JSON."""
+            choix = self.dashboard.combo_scenario.currentText()
+            self.moteur.entites.clear()
+            fichier = ""
+            if choix == "Heure de Pointe": fichier = "heure_de_pointe.json"
+            elif choix == "Urgences (VTA)": fichier = "urgences.json"
+            
+            if fichier:
+                chemin = os.path.join(os.path.dirname(__file__), "..", "data", "scenarios", fichier)
+                try:
+                    with open(chemin, "r", encoding="utf-8") as f:
+                        donnees = json.load(f)
+                    for item in donnees:
+                        v_type_str = item.get("type", "VOITURE")
+                        v_type = getattr(TypeVehicule, v_type_str, TypeVehicule.VOITURE)
+                        v = Vehicule(id_vehicule=item.get("id", str(uuid.uuid4())[:8]), v_type=v_type)
+                        v.pos_x = item.get("pos_x", 0.0)
+                        v.pos_y = item.get("pos_y", 0.0)
+                        v.cap = item.get("cap", 0.0)
+                        v.vitesse = item.get("vitesse", 0.0)
+                        self.moteur.ajouter_entite(v)
+                except Exception as e:
+                    print(f"Erreur chargement {fichier}: {e}")
+                    
+        self.dashboard.btn_load_scenario.clicked.connect(charger_scenario)
+
+    def set_type_a_placer(self, t):
+        """
+        Définit l'outil de placement (véhicule à spawner).
+        Met à jour l'indicateur visuel (fantôme) dans la scène.
+        """
+        self.type_a_placer = t
+        voie = self.dashboard.combo_voie_spawn.currentText()
+        self.scene.set_fantome(t, voie)
+        
+        if t is not None:
+            self.dashboard.lbl_mode_placement.setText(f"Prêt à placer : {t.name}")
+        else:
+            self.dashboard.lbl_mode_placement.setText("Mode : Sélection")
+
+    def resizeEvent(self, event):
+        """Met à jour la position de l'indicateur de PAUSE lors d'un redimensionnement."""
+        super().resizeEvent(event)
+        self.pause_overlay.resize(self.view.size())
+
+    def keyPressEvent(self, event):
+        """
+        Gère les raccourcis clavier.
+        Touches 1 à 4 pour sélectionner un type de véhicule à placer.
+        """
+        if event.key() == Qt.Key.Key_1:
+            self.set_type_a_placer(TypeVehicule.VOITURE)
+        elif event.key() == Qt.Key.Key_2:
+            self.set_type_a_placer(TypeVehicule.POIDS_LOURD)
+        elif event.key() == Qt.Key.Key_3:
+            self.set_type_a_placer(TypeVehicule.VIG_VTA)
+        elif event.key() == Qt.Key.Key_4:
+            self.set_type_a_placer(TypeVehicule.PIETON)
+        elif event.key() == Qt.Key.Key_5:
+            self.set_type_a_placer(TypeVehicule.CYCLISTE)
+        elif event.key() == Qt.Key.Key_Escape:
+            self.set_type_a_placer(None)
+            
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        """Nettoie les threads lors de la fermeture de la fenêtre."""
+        if hasattr(self, 'moteur') and self.moteur.isRunning(): 
+            self.moteur.arreter()
+        if hasattr(self, 'client_node') and self.client_node is not None: 
+            self.client_node.stop()
+        event.accept()
+
+if __name__ == "__main__":
+    config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+    except Exception:
+        config = {}
+        
+    app = QApplication(sys.argv)
+    app.setApplicationName("Esk-2718 Client")
+    
+    w = MainWindow(config)
+    # Lancement en plein écran
+    w.showFullScreen()
+    
+    sys.exit(app.exec())

@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 """
 Modèles physiques vectoriels (Intégration d'Euler).
 Implémente le Modèle Cinématique et l'Aérodynamisme.
@@ -9,6 +12,7 @@ from enum import Enum
 
 
 class TypeVehicule(Enum):
+    """Énumération des différents types de véhicules."""
     VOITURE = 1
     POIDS_LOURD = 2
     CONVOI_EXCEPTIONNEL = 3
@@ -19,9 +23,16 @@ class TypeVehicule(Enum):
 
 
 class EntitePhysique:
+    """Représente une entité physique de base (position, vitesse)."""
     """Entité soumise aux lois de la dynamique d'Euler."""
     
-    def __init__(self, id_entite, type_entite, masse_kg):
+    def __init__(self, id_entite, type_entite, masse_kg=1000.0):
+        """Initialise l'objet avec les paramètres requis.
+        
+        Args:
+            *args: Arguments divers.
+            **kwargs: Paramètres nommés.
+        """
         self.__id_entite = id_entite
         self.__type_entite = type_entite
         
@@ -42,6 +53,7 @@ class EntitePhysique:
         self.__freinage_mecanique = False
         self.__action_intersection = None
         self.__etat_depassement = 0 # 0: normal, 1: deboitement, 2: rabattement
+        self.a_detruire = False
         
         # Caractéristiques Géométriques et Aérodynamiques
         self.__longueur_m = 4.0     
@@ -151,7 +163,14 @@ class EntitePhysique:
 class Vehicule(EntitePhysique):
     """Véhicule avec équipement (pneus, ABS, aérodynamisme)."""
     
-    def __init__(self, id_vehicule, v_type):
+    def __init__(self, id_vehicule, v_type, masse_kg=None):
+        """Initialise l'objet avec les paramètres requis.
+        
+        Args:
+            id_vehicule: ID du vehicule
+            v_type: Type de vehicule
+            masse_kg: Masse en kg (optionnel)
+        """
         masse_initiale = 1500.0
         try:
             if v_type == TypeVehicule.VOITURE:
@@ -167,17 +186,20 @@ class Vehicule(EntitePhysique):
                 masse_initiale = random.gauss(3500.0, 300.0)
                 longueur, largeur, cx, surface = 5.0, 2.0, 0.4, 3.5
             elif v_type == TypeVehicule.PIETON:
-                masse_initiale = random.gauss(75.0, 15.0) 
+                masse_initiale = random.gauss(75.0, 15.0)
                 longueur, largeur, cx, surface = 0.5, 0.5, 1.0, 0.8
             elif v_type == TypeVehicule.CYCLISTE:
-                masse_initiale = random.gauss(90.0, 15.0) 
+                masse_initiale = random.gauss(90.0, 15.0)
                 longueur, largeur, cx, surface = 1.8, 0.6, 0.9, 1.0
             else:
                 longueur, largeur, cx, surface = 4.0, 1.8, 0.3, 2.2
         except Exception:
             longueur, largeur, cx, surface = 4.0, 1.8, 0.3, 2.2
             
-        super().__init__(id_vehicule, v_type, masse_initiale)
+        if masse_kg is None:
+            masse_kg = masse_initiale
+            
+        super().__init__(id_vehicule, v_type, masse_kg)
         self.longueur_m = longueur
         self.largeur_m = largeur
         self.cx = cx

@@ -1,3 +1,6 @@
+import logging
+logger = logging.getLogger(__name__)
+
 import socket
 import json
 import threading
@@ -7,6 +10,7 @@ from database.db_manager import DBManager
 from simulation.intersection import IntersectionManager
 
 class ServerNode(threading.Thread):
+    """Nœud serveur gérant les connexions TCP et UDP."""
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -34,7 +38,7 @@ class ServerNode(threading.Thread):
     def run(self):
         self.running = True
         last_update = time.time()
-        print(f"[ServerNode] Listening TCP on {self.tcp_ip}:{self.tcp_port}, UDP on {self.udp_port}")
+        logger.info(f"[ServerNode] Listening TCP on {self.tcp_ip}:{self.tcp_port}, UDP on {self.udp_port}")
         
         while self.running:
             now = time.time()
@@ -66,34 +70,38 @@ class ServerNode(threading.Thread):
                 
             for sock in readable:
                 if sock is self.tcp_sock:
-                    client, addr = self.tcp_sock.accept()
-                    self.clients.append(client)
-                    self.client_buffers[client] = ""
-                    print(f"[ServerNode] New TCP client: {addr}")
-                    self._send_state(client)
+                    try:
+                        client, addr = self.tcp_sock.accept()
+                        self.clients.append(client)
+                        self.client_buffers[client] = ""
+                        logger.info(f"[ServerNode] New TCP client: {addr}")
+                        self._send_state(client)
+                    except Exception as e:
+                        if self.running:
+                            logger.warning(f"TCP accept error: {e}")
                 elif sock is self.udp_sock:
                     try:
-                        data, addr = self.udp_sock.recvfrom(1024)
-                        payload = json.loads(data.decode('utf-8'))
+                        data, addr = self.udp_sock.recvfrom(2048)
+                        payload = json.loads(data.decode('utf-8', errors='ignore'))
                         self._handle_udp(payload, addr)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"UDP parsing error: {e}")
                 else:
                     try:
-                        data = sock.recv(1024)
+                        data = sock.recv(2048)
                         if not data:
                             self._remove_client(sock)
                             continue
                             
-                        self.client_buffers[sock] += data.decode('utf-8')
+                        self.client_buffers[sock] += data.decode('utf-8', errors='ignore')
                         while '\n' in self.client_buffers[sock]:
                             msg, self.client_buffers[sock] = self.client_buffers[sock].split('\n', 1)
                             if not msg.strip(): continue
                             try:
                                 payload = json.loads(msg)
                                 self._handle_tcp(payload)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.warning(f"TCP JSON decode error: {e}")
                     except Exception:
                         self._remove_client(sock)
 
@@ -117,7 +125,10 @@ class ServerNode(threading.Thread):
                 "feu_ns": self.intersection.feu_ns.value,
                 "feu_eo": self.intersection.feu_eo.value
             })
-            self.udp_sock.sendto(ack_msg.encode('utf-8'), addr)
+            try:
+                self.udp_sock.sendto(ack_msg.encode('utf-8'), addr)
+            except Exception:
+                pass
             
         elif ptype == "vta_end":
             self.intersection.annuler_urgence()
@@ -135,7 +146,7 @@ class ServerNode(threading.Thread):
             "feu_eo": self.intersection.feu_eo.value
         }) + "\n"
         try:
-            client.send(msg.encode('utf-8'))
+            client.sendall(msg.encode('utf-8'))
         except Exception:
             self._remove_client(client)
             
@@ -148,7 +159,7 @@ class ServerNode(threading.Thread):
         bmsg = msg.encode('utf-8')
         for c in list(self.clients):
             try:
-                c.send(bmsg)
+                c.sendall(bmsg)
             except Exception:
                 self._remove_client(c)
 
