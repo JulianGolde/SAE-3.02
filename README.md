@@ -49,9 +49,9 @@ pip install -r requirements.txt
 
 4. **Lancer l'application** :
 ```bash
-python src/main.py
+python src/server_main.py
+python src/client_main.py
 ```
-
 ---
 
 ### 📁 Structure du projet
