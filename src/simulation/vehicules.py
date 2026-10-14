@@ -6,6 +6,7 @@ Encapsulation stricte via @property (attributs pseudo-privés).
 import math
 import random
 from enum import Enum
+from simulation.intersection import CouleurFeu
 
 
 class TypeVehicule(Enum):
@@ -212,3 +213,52 @@ class Vehicule(EntitePhysique):
             return 0.5 * densite_air_rho * self.surface_frontale_m2 * self.cx * (self.vitesse ** 2)
         except Exception:
             return 0.0
+
+    # --- Comportement des piétons : attendre au bord, traverser UNE fois, puis disparaître ---
+    LIGNE_PASSAGE = 9.0     # m : position du passage piéton par rapport au centre
+    BORD = 4.0              # m : bord de la chaussée (route de 8 m, centrée sur 0)
+    SORTIE = 3.0            # m : distance parcourue après l'autre bord avant de disparaître
+    VITESSE_MARCHE = 1.5    # m/s
+
+    def mettre_a_jour_pieton(self, intersection):
+
+        marche_selon_x = abs(math.cos(self.cap)) > 0.5
+
+        # Le piéton reste sur sa ligne de passage ; 'pos' est sa position le long de la traversée
+        if marche_selon_x:
+            self.pos_y = self.LIGNE_PASSAGE if self.pos_y > 0 else -self.LIGNE_PASSAGE
+            pos = self.pos_x
+        else:
+            self.pos_x = self.LIGNE_PASSAGE if self.pos_x > 0 else -self.LIGNE_PASSAGE
+            pos = self.pos_y
+
+        etat = getattr(self, "etat_traversee", None)
+
+        # Premier appel : on décide d'où il part et dans quel sens il va
+        if etat is None:
+            if pos <= -self.BORD:
+                sens, pos, etat = 1.0, -self.BORD, "attente"
+            elif pos >= self.BORD:
+                sens, pos, etat = -1.0, self.BORD, "attente"
+            else:
+                direction = math.cos(self.cap) if marche_selon_x else math.sin(self.cap)
+                sens, etat = (1.0 if direction > 0 else -1.0), "traverse"
+            self.sens_traversee = sens
+            if marche_selon_x:
+                self.pos_x = pos
+                self.cap = 0.0 if sens > 0 else math.pi
+            else:
+                self.pos_y = pos
+                self.cap = math.pi / 2 if sens > 0 else -math.pi / 2
+
+        if etat == "attente":
+            self.vitesse = 0.0
+            if intersection.get_couleur_pieton(marche_selon_x) == CouleurFeu.VERT:
+                etat = "traverse"
+
+        if etat == "traverse":
+            self.vitesse = self.VITESSE_MARCHE
+            if pos * self.sens_traversee >= self.BORD + self.SORTIE:   # arrivé de l'autre côté
+                self.a_supprimer = True
+
+        self.etat_traversee = etat

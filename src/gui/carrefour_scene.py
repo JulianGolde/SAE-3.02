@@ -117,6 +117,35 @@ class CarrefourScene(QGraphicsScene):
         self.feu_ns_1 = self.addEllipse(-65, -130, 20, 20, no_pen, QBrush(Qt.GlobalColor.black))
         self.feu_ns_2 = self.addEllipse(45, 110, 20, 20, no_pen, QBrush(Qt.GlobalColor.black))
 
+        # Feux piétons (un par passage piéton)
+        self.feux_pieton_marche_x = [  # passages nord et sud : piétons qui marchent selon x
+        self._creer_feu_pieton(61, -103), self._creer_feu_pieton(-79, -103),  # nord
+        self._creer_feu_pieton(-79, 77), self._creer_feu_pieton(61, 77),  # sud
+        ]
+        self.feux_pieton_marche_y = [  # passages est et ouest : piétons qui marchent selon y
+        self._creer_feu_pieton(81, 61), self._creer_feu_pieton(81, -87),  # est
+        self._creer_feu_pieton(-99, -87), self._creer_feu_pieton(-99, 61),  # ouest
+        ]
+
+    def _creer_feu_pieton(self, x, y):
+        """Dessine un feu piéton (petit bonhomme sur fond noir) dont le coin haut-gauche est en (x, y).
+        Renvoie l'élément du bonhomme : on change sa couleur avec setBrush()."""
+        no_pen = QPen(Qt.PenStyle.NoPen)
+        self.addRect(x, y, 18, 26, no_pen, QBrush(QColor("#111111")))  # boîtier noir
+
+        p = QPainterPath()
+        p.setFillRule(Qt.FillRule.WindingFill)
+        p.addEllipse(6.5, 3, 5, 5)  # tête
+        p.addRect(6, 9, 6, 7)  # corps
+        p.addRect(4, 9.5, 2, 6)  # bras gauche
+        p.addRect(12, 9.5, 2, 6)  # bras droit
+        p.addRect(6, 16, 2.5, 7)  # jambe gauche
+        p.addRect(9.5, 16, 2.5, 7)  # jambe droite
+
+        bonhomme = self.addPath(p, no_pen, QBrush(QColor("#F44336")))
+        bonhomme.setPos(x, y)
+        return bonhomme
+
     def _obtenir_couleur_qt(self, enum_feu):
         if enum_feu == CouleurFeu.VERT: return QColor("#4CAF50")
         elif enum_feu == CouleurFeu.ORANGE: return QColor("#FF9800")
@@ -128,6 +157,10 @@ class CarrefourScene(QGraphicsScene):
             c_ns = self._obtenir_couleur_qt(intersection.feu_ns)
             self.feu_eo_1.setBrush(QBrush(c_eo)); self.feu_eo_2.setBrush(QBrush(c_eo))
             self.feu_ns_1.setBrush(QBrush(c_ns)); self.feu_ns_2.setBrush(QBrush(c_ns))
+            c_px = self._obtenir_couleur_qt(intersection.get_couleur_pieton(True))  # passages nord et sud
+            c_py = self._obtenir_couleur_qt(intersection.get_couleur_pieton(False))  # passages est et ouest
+            for feu in self.feux_pieton_marche_x: feu.setBrush(QBrush(c_px))
+            for feu in self.feux_pieton_marche_y: feu.setBrush(QBrush(c_py))
 
             self.compteur_arbres += 0.05
             angle_vent = math.sin(self.compteur_arbres) * 5.0
@@ -226,7 +259,7 @@ class CarrefourScene(QGraphicsScene):
                 vue = self.vues_entites[entite.id_entite]
                 vue.setPos(px, py)
                 vue.setRotation(math.degrees(entite.cap))
-                
+
             a_supprimer = []
             for e_id, vue in self.vues_entites.items():
                 if e_id not in ids_presents:
@@ -234,7 +267,8 @@ class CarrefourScene(QGraphicsScene):
                     a_supprimer.append(e_id)
             for e_id in a_supprimer:
                 del self.vues_entites[e_id]
-                
+
+
         except Exception:
             pass
             

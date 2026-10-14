@@ -53,7 +53,7 @@ class MoteurSimulation(QThread):
 
                 if self.network_client is None:
                     self.intersection.update(dt)
-                self.entites = [e for e in self.entites if -150.0 < e.pos_x < 150.0 and -150.0 < e.pos_y < 150.0]
+                self.entites = [e for e in self.entites if -150.0 < e.pos_x < 150.0 and -150.0 < e.pos_y < 150.0 and not getattr(e, 'a_supprimer',False)]
 
                 # 1. URGENCE VTA (Global)
                 vta_proche = False
@@ -79,25 +79,7 @@ class MoteurSimulation(QThread):
                 # 2. COMPORTEMENT DE CHAQUE ENTITÉ
                 for i, entite in enumerate(self.entites):
                     if entite.type_entite == TypeVehicule.PIETON:
-                        # Les piétons se déplacent à vitesse fixe sur les clous
-                        entite.commande_acceleration = 0.0
-                        entite.vitesse = 1.5
-                        if abs(math.cos(entite.cap)) > 0.5:
-                            entite.pos_y = 9.0 if entite.pos_y > 0 else -9.0
-                            if entite.pos_x > 4.5:
-                                entite.cap = math.pi
-                                entite.pos_x = 4.5
-                            elif entite.pos_x < -4.5:
-                                entite.cap = 0.0
-                                entite.pos_x = -4.5
-                        else:
-                            entite.pos_x = 9.0 if entite.pos_x > 0 else -9.0
-                            if entite.pos_y > 4.5:
-                                entite.cap = -math.pi/2
-                                entite.pos_y = 4.5
-                            elif entite.pos_y < -4.5:
-                                entite.cap = math.pi/2
-                                entite.pos_y = -4.5
+                        entite.mettre_a_jour_pieton(self.intersection)
                         continue
 
                     est_axe_x = entite.est_axe_x
@@ -115,7 +97,7 @@ class MoteurSimulation(QThread):
                             if entite.est_axe_x:
                                 entite.voie_cible_y = 2.0 if math.cos(entite.cap_cible) > 0 else -2.0
                             else:
-                                entite.voie_cible_x = 2.0 if math.sin(entite.cap_cible) > 0 else -2.0
+                               entite.voie_cible_x = -2.0 if math.sin(entite.cap_cible) > 0 else 2.0
                             entite.action_intersection = None
 
                     # --- FEUX TRICOLORES ---
@@ -234,7 +216,7 @@ class MoteurSimulation(QThread):
 
                     if entite.etat_depassement == 2:
                         if est_axe_x: entite.voie_cible_y = 2.0 if math.cos(entite.cap_cible) > 0 else -2.0
-                        else: entite.voie_cible_x = 2.0 if math.sin(entite.cap_cible) > 0 else -2.0
+                        else:entite.voie_cible_x = -2.0 if math.sin(entite.cap_cible) > 0 else 2.0
                         entite.etat_depassement = 0
 
                     # --- PID ACCÉLÉRATION & FREINAGE PROGRESSIF ---

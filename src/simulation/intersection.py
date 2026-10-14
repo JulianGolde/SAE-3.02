@@ -4,7 +4,6 @@ class CouleurFeu(Enum):
     VERT = 1
     ORANGE = 2
     ROUGE = 3
-
 class IntersectionManager:
     """Gestionnaire Automatisé des Feux Tricolores."""
     def __init__(self):
@@ -83,6 +82,13 @@ class IntersectionManager:
         except Exception:
             return CouleurFeu.ROUGE
 
+    def get_couleur_pieton(self, marche_selon_x: bool) -> CouleurFeu:
+        feu_parallele = self.__feu_eo if marche_selon_x else self.__feu_ns
+        return CouleurFeu.VERT if feu_parallele == CouleurFeu.VERT else CouleurFeu.ROUGE
+
     def set_state(self, feu_ns_val, feu_eo_val):
         self.__feu_ns = CouleurFeu(feu_ns_val)
         self.__feu_eo = CouleurFeu(feu_eo_val)
+
+
+

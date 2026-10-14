@@ -3,6 +3,7 @@ import uuid
 import math
 import json
 import os
+import traceback
 from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QGraphicsView
 from PyQt6.QtGui import QPainter, QIcon, QPixmap, QColor, QPen, QLinearGradient
 from PyQt6.QtCore import Qt
@@ -258,7 +259,19 @@ if __name__ == "__main__":
             config = json.load(f)
     except Exception:
         config = {}
-        
+    erreurs_deja_vues = set()
+
+
+    def afficher_exception(exc_type, exc_value, exc_tb):
+        """Affiche l'erreur (une fois par type d'erreur) au lieu de fermer l'application."""
+        cle = (exc_type.__name__, str(exc_value))
+        if cle not in erreurs_deja_vues:
+            erreurs_deja_vues.add(cle)
+            print("[Erreur non rattrapée dans l'interface]")
+            traceback.print_exception(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = afficher_exception
+
     app = QApplication(sys.argv)
     app.setApplicationName("Esk-2718 Client")
     w = MainWindow(config)
