@@ -81,10 +81,29 @@ class IntersectionManager:
             return self.__feu_eo if axe_x else self.__feu_ns
         except Exception:
             return CouleurFeu.ROUGE
-
+    """
     def get_couleur_pieton(self, marche_selon_x: bool) -> CouleurFeu:
         feu_parallele = self.__feu_eo if marche_selon_x else self.__feu_ns
         return CouleurFeu.VERT if feu_parallele == CouleurFeu.VERT else CouleurFeu.ROUGE
+    """
+    #Nouvelle méthode comportement feu piéton
+
+    def get_couleur_pieton(self, marche_selon_x: bool) -> CouleurFeu:
+        # Pendant l'urgence, interdire le début d'une nouvelle traversée.
+        # La sécurité d'un piéton déjà engagé est gérée séparément
+        # par le moteur de simulation.
+        if self.__urgence_active:
+            return CouleurFeu.ROUGE
+
+        feu_parallele = (
+            self.__feu_eo if marche_selon_x else self.__feu_ns
+        )
+
+        return (
+            CouleurFeu.VERT
+            if feu_parallele == CouleurFeu.VERT
+            else CouleurFeu.ROUGE
+        )
 
     def set_state(self, feu_ns_val, feu_eo_val):
         self.__feu_ns = CouleurFeu(feu_ns_val)

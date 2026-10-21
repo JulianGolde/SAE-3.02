@@ -15,7 +15,8 @@ class MoteurSimulation(QThread):
         self.intersection = IntersectionManager()
         self.__en_cours = False
         self.multiplicateur_temps = 1.0
-        self.densite_air_rho = 1.225 
+        self.densite_air_rho = 1.225
+        self.road_width = 8.0
         self.network_client = None
         self.last_metrics_time = 0
 
@@ -84,7 +85,7 @@ class MoteurSimulation(QThread):
                         continue
 
                     # --- DÉTECTION COMMUNE DES OBSTACLES ---
-                    portee = road_width* 0.75
+                    portee = self.road_width * 0.75
                     obstacles_detectes = detecter_obstacles(
                         entite,
                         self.entites,
@@ -105,7 +106,7 @@ class MoteurSimulation(QThread):
 
                     priorite_pieton = False
                     distance_arret_pieton = 999.0
-
+                    """""
                     # --- PRIORITÉ AUX PIÉTONS LORS DES VIRAGES ---
                     veut_tourner = (
                             entite.action_intersection is not None
@@ -152,6 +153,66 @@ class MoteurSimulation(QThread):
                                 distance_arret_pieton = distance_pieton
                                 priorite_pieton = True
                                 break
+                     """
+
+                    # --- DÉTECTION ET PRIORITÉ AUX PIÉTONS ---
+                    for pieton in self.entites:
+                        if pieton.type_entite != TypeVehicule.PIETON:
+                            continue
+
+                        # Seuls les piétons engagés dans la traversée sont prioritaires
+                        if getattr(pieton, "etat_traversee", None) != "traverse":
+                            continue
+                        """""
+                        marche_selon_x = abs(math.cos(pieton.cap)) > 0.5
+                        feu_pieton = self.intersection.get_couleur_pieton(marche_selon_x)
+
+                        if feu_pieton != CouleurFeu.VERT:
+                            continue
+                        """""
+                        #  bloc de détection piéton
+                        marche_selon_x = abs(math.cos(pieton.cap)) > 0.5
+
+                        # Un piéton déjà engagé reste détecté même si son feu passe au rouge.
+                        etat_pieton = getattr(pieton, "etat_traversee", None)
+
+                        if etat_pieton != "traverse":
+                            feu_pieton = self.intersection.get_couleur_pieton(
+                                marche_selon_x
+                            )
+                            if feu_pieton != CouleurFeu.VERT:
+                                continue
+
+                        dx = pieton.pos_x - entite.pos_x
+                        dy = pieton.pos_y - entite.pos_y
+
+                        # Position relative du piéton par rapport au véhicule
+                        avant = (
+                                dx * math.cos(entite.cap)
+                                + dy * math.sin(entite.cap)
+                        )
+
+                        cote = abs(
+                            -dx * math.sin(entite.cap)
+                            + dy * math.cos(entite.cap)
+                        )
+
+                        # Détecter un piéton devant ou à proximité de la trajectoire
+                        # même si le véhicule ne tourne pas
+                        if -2.0 <= avant <= 20.0 and cote <= 4.0:
+                            distance_pieton = max(
+                                0.0,
+                                avant - entite.longueur_m / 2.0 - 2.0
+                            )
+
+                            # Le piéton peut imposer un arrêt, même si un feu
+                            # ou un autre véhicule avait déjà fixé une distance
+                            if distance_pieton < distance_arret:
+                                distance_arret = distance_pieton
+                                obstacle_nature = "Pieton"
+                                vitesse_obstacle = 0.0
+                                priorite_pieton = True
+                                distance_arret_pieton = distance_pieton
 
                     # --- CHANGEMENT DE DIRECTION A L'INTERSECTION ---
                     if entite.action_intersection is not None:

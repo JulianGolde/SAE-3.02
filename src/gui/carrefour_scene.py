@@ -8,6 +8,7 @@ from simulation.vehicules import TypeVehicule
 
 class CarrefourScene(QGraphicsScene):
     PIXELS_PAR_METRE = 10.0
+    LARGEUR_ROUTE_M = 8.0
     signal_entite_selectionnee = pyqtSignal(str)
     signal_clic_vide = pyqtSignal(float, float)
 
@@ -35,7 +36,8 @@ class CarrefourScene(QGraphicsScene):
             flaque.setVisible(visibilite_flaques)
 
     def _draw_infrastructure(self):
-        road_width = 8.0 * self.PIXELS_PAR_METRE 
+       # road_width = 8.0 * self.PIXELS_PAR_METRE
+        road_width = self.LARGEUR_ROUTE_M * self.PIXELS_PAR_METRE
         
         road_grad_v = QLinearGradient(-road_width/2, 0, road_width/2, 0)
         road_grad_v.setColorAt(0.0, QColor("#444444"))

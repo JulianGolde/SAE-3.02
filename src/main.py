@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.dashboard)
 
         self.moteur = MoteurSimulation()
+        self.moteur.road_width = self.scene.LARGEUR_ROUTE_M
         
         def rafraichir_interface(entites, inter):
             self.scene.mettre_a_jour_entites(entites, inter)
