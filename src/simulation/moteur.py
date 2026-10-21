@@ -4,6 +4,7 @@ import time
 from PyQt6.QtCore import QThread, pyqtSignal, QElapsedTimer
 from simulation.vehicules import TypeVehicule
 from simulation.intersection import IntersectionManager, CouleurFeu
+from simulation.detecteur import detecter_obstacles
 
 class MoteurSimulation(QThread):
     tick_simulation = pyqtSignal(list, object)
@@ -82,11 +83,76 @@ class MoteurSimulation(QThread):
                         entite.mettre_a_jour_pieton(self.intersection)
                         continue
 
+                    # --- DÉTECTION COMMUNE DES OBSTACLES ---
+                    portee = road_width* 0.75
+                    obstacles_detectes = detecter_obstacles(
+                        entite,
+                        self.entites,
+                        portee=portee,
+                        angle_ouverture=math.pi * 2 / 3,
+                    )
+                    #Test uniquement pour un diagnostic peut afficher bcp de msg lors de la simulation
+                    if obstacles_detectes:
+                        print(
+                            f"Obstacles détectés devant {entite.type_entite} : "
+                            f"{len(obstacles_detectes)}"
+                        )
+
                     est_axe_x = entite.est_axe_x
                     distance_arret = 999.0
                     obstacle_nature = "Aucun"
                     vitesse_obstacle = 0.0
-                    
+
+                    priorite_pieton = False
+                    distance_arret_pieton = 999.0
+
+                    # --- PRIORITÉ AUX PIÉTONS LORS DES VIRAGES ---
+                    veut_tourner = (
+                            entite.action_intersection is not None
+                            or abs(entite.cap_cible - entite.cap) > 0.1
+                    )
+
+                    if veut_tourner:
+                        for pieton in self.entites:
+                            if pieton.type_entite != TypeVehicule.PIETON:
+                                continue
+
+                            if getattr(pieton, "etat_traversee", None) != "traverse":
+                                continue
+
+                            marche_selon_x = abs(math.cos(pieton.cap)) > 0.5
+                            feu_pieton = self.intersection.get_couleur_pieton(
+                                marche_selon_x
+                            )
+
+                            if feu_pieton != CouleurFeu.VERT:
+                                continue
+
+                            # Distance dans l'axe avant du véhicule
+                            dx = pieton.pos_x - entite.pos_x
+                            dy = pieton.pos_y - entite.pos_y
+
+                            avant = (
+                                    dx * math.cos(entite.cap)
+                                    + dy * math.sin(entite.cap)
+                            )
+
+                            cote = abs(
+                                -dx * math.sin(entite.cap)
+                                + dy * math.cos(entite.cap)
+                            )
+
+                            # Le piéton doit être devant ou à proximité de la trajectoire
+                            if -2.0 <= avant <= 20.0 and cote <= 4.0:
+                                distance_pieton = max(
+                                    0.0,
+                                    avant - entite.longueur_m / 2.0 - 2.0
+                                )
+
+                                distance_arret_pieton = distance_pieton
+                                priorite_pieton = True
+                                break
+
                     # --- CHANGEMENT DE DIRECTION A L'INTERSECTION ---
                     if entite.action_intersection is not None:
                         dist_centre = math.hypot(entite.pos_x, entite.pos_y)
@@ -116,6 +182,12 @@ class MoteurSimulation(QThread):
                             if dist_ligne > (entite.vitesse * 2.0): # 2 secondes pour s'arrêter
                                 distance_arret = dist_ligne
                                 obstacle_nature = "FeuOrange"
+
+                    # --- APPLICATION DE LA PRIORITÉ PIÉTON ---
+                    if priorite_pieton and distance_arret_pieton < distance_arret:
+                        distance_arret = distance_arret_pieton
+                        obstacle_nature = "Pieton"
+                        vitesse_obstacle = 0.0
 
                     # --- DÉTECTION VEHICULES (RAYCAST) ---
                     vehicule_devant = None
@@ -164,6 +236,15 @@ class MoteurSimulation(QThread):
                                         obstacle_nature = "Vehicule"
                                         vitesse_obstacle = autre.vitesse
                                         vehicule_devant = autre
+
+                                    # --- PRIORITÉ PIÉTON : ARRÊT COMPLET ---
+                                if priorite_pieton:
+                                    distance_arret = min(
+                                        distance_arret,
+                                        distance_arret_pieton
+                                    )
+                                    obstacle_nature = "Pieton"
+                                    vitesse_obstacle = 0.0
 
                     # --- LOGIQUE DE DÉPASSEMENT (Camions, VTA, etc.) ---
                     if obstacle_nature == "Vehicule" and distance_arret < 25.0 and entite.etat_depassement == 0:
@@ -224,7 +305,7 @@ class MoteurSimulation(QThread):
                     if entite.type_entite == TypeVehicule.CYCLISTE: cible = 5.5
                     elif entite.type_entite == TypeVehicule.POIDS_LOURD: cible = 11.0
                     elif entite.type_entite == TypeVehicule.VIG_VTA: cible = 22.0
-
+                    """""
                     if distance_arret < 60.0:
                         marge = 2.0 + entite.vitesse * 1.0 if obstacle_nature == "Vehicule" else 0.5
                         dist_utile = max(0.0, distance_arret - marge)
@@ -255,6 +336,67 @@ class MoteurSimulation(QThread):
                             entite.vitesse = 0.0
                     else:
                         entite.freinage_mecanique = False
+                        if entite.vitesse < cible:
+                            entite.commande_acceleration = 2.5
+                        else:
+                            entite.commande_acceleration = 0.0
+                    """""
+
+                    if obstacle_nature == "Pieton" and distance_arret <= 0.5:
+                        # Arrêt complet pendant que le piéton est prioritaire
+                        entite.commande_acceleration = 0.0
+                        entite.freinage_mecanique = True
+                        entite.vitesse = 0.0
+
+                    elif distance_arret < 60.0:
+                        marge = (
+                            2.0 + entite.vitesse
+                            if obstacle_nature == "Vehicule"
+                            else 0.5
+                        )
+                        dist_utile = max(0.0, distance_arret - marge)
+
+                        v_securite = vitesse_obstacle + math.sqrt(
+                            2 * 2.0 * dist_utile
+                        )
+                        vitesse_cible = min(cible, v_securite)
+
+                        erreur_v = vitesse_cible - entite.vitesse
+
+                        if erreur_v > 0.1:
+                            entite.commande_acceleration = min(
+                                2.5, erreur_v
+                            )
+                            entite.freinage_mecanique = False
+
+                        elif erreur_v < -0.1:
+                            acc_requise = erreur_v * 2.0
+
+                            if acc_requise > -1.5:
+                                entite.commande_acceleration = acc_requise
+                                entite.freinage_mecanique = False
+                            else:
+                                entite.commande_acceleration = max(
+                                    acc_requise, -8.0
+                                )
+                                entite.freinage_mecanique = True
+
+                        else:
+                            entite.commande_acceleration = 0.0
+                            entite.freinage_mecanique = False
+
+                        if (
+                                distance_arret <= 0.5
+                                and vitesse_obstacle < 0.1
+                                and obstacle_nature != "Pieton"
+                        ):
+                            entite.commande_acceleration = -5.0
+                            entite.freinage_mecanique = True
+                            entite.vitesse = 0.0
+
+                    else:
+                        entite.freinage_mecanique = False
+
                         if entite.vitesse < cible:
                             entite.commande_acceleration = 2.5
                         else:

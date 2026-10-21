@@ -1,0 +1,14 @@
+# Environnements virtuels
+.venv*/
+venv/
+
+# Éditeurs
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Données générées par le serveur
+data/metrics.db
