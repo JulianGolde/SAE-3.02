@@ -42,10 +42,12 @@ class DashboardPanel(QWidget):
         self.combo_scenario = QComboBox()
         self.combo_scenario.addItems(["-- Scénarios JSON --", "Heure de Pointe", "Urgences (VTA)"])
         self.btn_load_scenario = QPushButton("Charger Scénario")
+        self.btn_import_scenario = QPushButton("📂 Importer un scénario JSON")
         feux_layout.addWidget(self.btn_feux_ns)
         feux_layout.addWidget(self.btn_feux_eo)
         feux_layout.addWidget(self.combo_scenario)
         feux_layout.addWidget(self.btn_load_scenario)
+        feux_layout.addWidget(self.btn_import_scenario)
         feux_group.setLayout(feux_layout)
         
         hud_group = QGroupBox("🔍 HUD et Pilotage")

@@ -4,7 +4,7 @@ import math
 import json
 import os
 import traceback
-from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QGraphicsView
+from PyQt6.QtWidgets import QApplication, QMainWindow, QHBoxLayout, QWidget, QGraphicsView,QFileDialog,QMessageBox
 from PyQt6.QtGui import QPainter, QIcon, QPixmap, QColor, QPen, QLinearGradient
 from PyQt6.QtCore import Qt
 
@@ -246,6 +246,73 @@ class MainWindow(QMainWindow):
                     print(f"Erreur chargement {fichier}: {e}")
                     
         self.dashboard.btn_load_scenario.clicked.connect(charger_scenario)
+        # ajout permettant la gestion d'un fichier json directement via l'interface graphique
+
+        def importer_scenario():
+            fichier, _ = QFileDialog.getOpenFileName(
+                self,
+                "Importer un scénario JSON",
+                "",
+                "Fichiers JSON (*.json)"
+            )
+
+            if not fichier:
+                return
+
+            try:
+                with open(fichier, "r", encoding="utf-8") as f:
+                    donnees = json.load(f)
+
+                if not isinstance(donnees, list):
+                    raise ValueError(
+                        "Le scénario doit contenir une liste d'entités."
+                    )
+
+                nouvelles_entites = []
+
+                for item in donnees:
+                    if not isinstance(item, dict):
+                        raise ValueError("Une entité du scénario est invalide.")
+
+                    type_str = item.get("type", "VOITURE")
+
+                    if type_str not in TypeVehicule.__members__:
+                        raise ValueError(
+                            f"Type de véhicule inconnu : {type_str}"
+                        )
+
+                    v = Vehicule(
+                        id_vehicule=item.get(
+                            "id", str(uuid.uuid4())[:8]
+                        ),
+                        v_type=TypeVehicule[type_str]
+                    )
+
+                    v.pos_x = float(item.get("pos_x", 0.0))
+                    v.pos_y = float(item.get("pos_y", 0.0))
+                    v.cap = float(item.get("cap", 0.0))
+                    v.vitesse = float(item.get("vitesse", 0.0))
+
+                    nouvelles_entites.append(v)
+
+                self.moteur.entites.clear()
+
+                for entite in nouvelles_entites:
+                    self.moteur.ajouter_entite(entite)
+
+                QMessageBox.information(
+                    self,
+                    "Import réussi",
+                    f"{len(nouvelles_entites)} entité(s) importée(s)."
+                )
+
+            except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
+                QMessageBox.critical(
+                    self,
+                    "Erreur d'importation",
+                    f"Impossible d'importer le scénario :\n{e}"
+                )
+        self.dashboard.btn_import_scenario.clicked.connect(importer_scenario)
 
     def closeEvent(self, event):
         if hasattr(self, 'moteur') and self.moteur.isRunning(): self.moteur.arreter()
@@ -277,3 +344,4 @@ if __name__ == "__main__":
     w = MainWindow(config)
     w.showMaximized()
     sys.exit(app.exec())
+
