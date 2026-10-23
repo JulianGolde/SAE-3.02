@@ -10,7 +10,9 @@ import json
 import logging
 import math
 import os
+import socket
 import sys
+import time
 import traceback
 import uuid
 
@@ -22,6 +24,7 @@ if repertoire_src not in sys.path:
 from PyQt6.QtCore import QMutexLocker, Qt, QTimer
 from PyQt6.QtGui import (
     QColor,
+    QFont,
     QIcon,
     QKeyEvent,
     QLinearGradient,
@@ -49,6 +52,11 @@ try:
     from network.client_node import ClientNode
 except ImportError:
     ClientNode = None
+
+try:
+    from network.server_node import ServerNode
+except ImportError:
+    ServerNode = None
 
 logger = logging.getLogger(__name__)
 
@@ -291,8 +299,42 @@ class MainWindow(QMainWindow):
         self.btn_overlay_reset.move(14, 14)
         self.btn_overlay_reset.clicked.connect(self.view.fit_scene)
 
+        # Force une police globale explicite en points (Segoe UI, 9) pour éradiquer tout setPointSize <= 0
+        if QApplication.instance():
+            default_font = QFont("Segoe UI", 9)
+            default_font.setPointSize(9)
+            QApplication.instance().setFont(default_font)
+
         # Moteur cinématique et initialisation réseau V2X
         self.moteur = MoteurSimulation()
+
+        # Innovation Chef d'Orchestre : Auto-serveur local embarqué en fallback
+        self.embedded_server = None
+        server_ip = str(self.config.get("server_ip", "127.0.0.1"))
+        server_tcp_port = int(self.config.get("server_tcp_port", 5000))
+
+        if server_ip in ("127.0.0.1", "localhost"):
+            serveur_present = False
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.15)
+                    s.connect((server_ip, server_tcp_port))
+                    serveur_present = True
+            except (ConnectionRefusedError, TimeoutError, OSError):
+                serveur_present = False
+
+            if not serveur_present and ServerNode is not None:
+                try:
+                    self.embedded_server = ServerNode(self.config)
+                    self.embedded_server.daemon = True
+                    self.embedded_server.start()
+                    logger.info(
+                        f"[MainWindow] Auto-serveur local démarré en fallback sur {server_ip}:{server_tcp_port}"
+                    )
+                    time.sleep(0.05)
+                except Exception as e_srv:
+                    logger.warning(f"[MainWindow] Impossible de démarrer le serveur local en fallback : {e_srv}")
+                    self.embedded_server = None
 
         if ClientNode is not None:
             try:
@@ -539,31 +581,35 @@ class MainWindow(QMainWindow):
                     nouvelle.pos_y = 9.0 if y > 0 else -9.0
                     nouvelle.cap = 0.0 if x < 0 else math.pi
             elif voie == "Nord -> Sud":
-                nouvelle.pos_x = -2.0
+                nouvelle.pos_x = -3.6 if self.type_a_placer == TypeVehicule.CYCLISTE else -2.0
                 nouvelle.pos_y = y
                 nouvelle.cap = math.pi / 2
             elif voie == "Sud -> Nord":
-                nouvelle.pos_x = 2.0
+                nouvelle.pos_x = 3.6 if self.type_a_placer == TypeVehicule.CYCLISTE else 2.0
                 nouvelle.pos_y = y
                 nouvelle.cap = -math.pi / 2
             elif voie == "Est -> Ouest":
-                nouvelle.pos_y = -2.0
+                nouvelle.pos_y = -3.6 if self.type_a_placer == TypeVehicule.CYCLISTE else -2.0
                 nouvelle.pos_x = x
                 nouvelle.cap = math.pi
             elif voie == "Ouest -> Est":
-                nouvelle.pos_y = 2.0
+                nouvelle.pos_y = 3.6 if self.type_a_placer == TypeVehicule.CYCLISTE else 2.0
                 nouvelle.pos_x = x
                 nouvelle.cap = 0.0
             else:
+                lat = 3.6 if self.type_a_placer == TypeVehicule.CYCLISTE else 2.0
                 if abs(y) < abs(x):
                     nouvelle.pos_x = x
-                    nouvelle.pos_y = 2.0 if y > 0 else -2.0
+                    nouvelle.pos_y = lat if y > 0 else -lat
                     nouvelle.cap = 0.0 if nouvelle.pos_y > 0 else math.pi
                 else:
                     nouvelle.pos_y = y
-                    nouvelle.pos_x = 2.0 if x > 0 else -2.0
+                    nouvelle.pos_x = lat if x > 0 else -lat
                     nouvelle.cap = math.pi / 2 if nouvelle.pos_x < 0 else -math.pi / 2
 
+            if self.type_a_placer == TypeVehicule.CYCLISTE:
+                nouvelle.action_intersection = None
+                nouvelle.en_virage_bezier = False
             nouvelle.vitesse = 0.0
             self.moteur.ajouter_entite(nouvelle)
 
@@ -585,7 +631,7 @@ class MainWindow(QMainWindow):
             if self.id_selectionne:
                 with QMutexLocker(self.moteur.mutex):
                     ent = next((e for e in self.moteur.entites if e.id_entite == self.id_selectionne), None)
-                    if ent:
+                    if ent and getattr(ent, 'type_entite', None) not in (TypeVehicule.CYCLISTE, TypeVehicule.VIG_VTA):
                         ent.action_intersection = angle
         except Exception as e:
             logger.error(f"[MainWindow] Erreur lors de la programmation du virage : {e}", exc_info=True)
@@ -614,6 +660,13 @@ class MainWindow(QMainWindow):
                         v.pos_y = item.get("pos_y", 0.0)
                         v.cap = item.get("cap", 0.0)
                         v.vitesse = item.get("vitesse", 0.0)
+                        if v_type == TypeVehicule.CYCLISTE:
+                            v.action_intersection = None
+                            v.en_virage_bezier = False
+                            if abs(math.cos(v.cap)) > 0.5:
+                                v.pos_y = 3.6 if math.cos(v.cap) > 0 else -3.6
+                            else:
+                                v.pos_x = -3.6 if math.sin(v.cap) > 0 else 3.6
                         self.moteur.ajouter_entite(v)
 
         except Exception as e:
@@ -632,10 +685,8 @@ class MainWindow(QMainWindow):
             else:
                 self.dashboard.lbl_mode_placement.setText("Mode : Sélection")
 
-            if t is None and self.scene.hologramme is not None:
-                self.scene.removeItem(self.scene.hologramme)
-                self.scene.hologramme = None
-                self.scene.type_hologramme = None
+            if t is None:
+                self.scene.supprimer_hologramme()
         except Exception as e:
             logger.error(f"[MainWindow] Erreur lors du paramétrage de l'outil de placement : {e}", exc_info=True)
 
@@ -684,6 +735,8 @@ class MainWindow(QMainWindow):
                 self.moteur.arreter()
             if hasattr(self, 'client_node') and self.client_node is not None:
                 self.client_node.stop()
+            if hasattr(self, 'embedded_server') and self.embedded_server is not None:
+                self.embedded_server.stop()
             event.accept()
         except Exception as e:
             logger.error(f"[MainWindow] Erreur lors de la fermeture de l'application : {e}", exc_info=True)
@@ -726,6 +779,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Esk-2718")
+    default_font = QFont("Segoe UI", 9)
+    default_font.setPointSize(9)
+    app.setFont(default_font)
     w = MainWindow(config)
 
     if config.get("windowed", False):

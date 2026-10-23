@@ -97,6 +97,9 @@ class EntitePhysique:
         self.__freinage_mecanique = False
         self.__action_intersection = None
         self.__etat_depassement = 0  # 0: suivi nominal, 1: déboîtement, 2: rabattement
+        self.indicateur_virage = 0  # -1: gauche, +1: droite, 0: tout droit
+        self.en_virage_bezier = False
+        self.en_panne = False
         self.a_detruire = False
 
         # Paramètres géométriques et aérodynamiques
@@ -206,7 +209,10 @@ class EntitePhysique:
         Args:
             val (float): Cap en radians.
         """
+        ancien_cap = self.__cap
         self.__cap = float(val)
+        if self.__cap_cible == ancien_cap:
+            self.__cap_cible = float(val)
 
     @property
     def cap_cible(self) -> float:
@@ -351,6 +357,14 @@ class EntitePhysique:
             val (float | None): Cap en radians ou None.
         """
         self.__action_intersection = float(val) if val is not None else None
+        if self.__action_intersection is not None:
+            delta = (self.__action_intersection - self.cap + math.pi) % (2.0 * math.pi) - math.pi
+            if delta < -0.1:
+                self.indicateur_virage = -1
+            elif delta > 0.1:
+                self.indicateur_virage = 1
+            else:
+                self.indicateur_virage = 0
 
     @property
     def etat_depassement(self) -> int:

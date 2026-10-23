@@ -190,6 +190,25 @@ class ClientNode(QThread):
                 self.udp_sock.bind(("0.0.0.0", 0))
 
             self.udp_sock.setblocking(False)
+
+            if hasattr(socket, "SIO_UDP_CONNRESET"):
+                try:
+                    self.udp_sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+                except Exception:
+                    pass
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    in_val = ctypes.c_ulong(0)
+                    cb = ctypes.c_ulong(0)
+                    # SIO_UDP_CONNRESET = 0x9800000C (désactivation WSAECONNRESET sous Windows)
+                    ctypes.windll.ws2_32.WSAIoctl(
+                        self.udp_sock.fileno(), 0x9800000C,
+                        ctypes.byref(in_val), ctypes.sizeof(in_val),
+                        None, 0, ctypes.byref(cb), None, None
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"[ClientNode] Échec de la création de la socket UDP : {e}", exc_info=True)
             raise
@@ -355,18 +374,23 @@ class ClientNode(QThread):
                     self._traiter_file_sortante()
 
                     # Préparation des sockets à surveiller via select
-                    sockets_to_watch = [self.udp_sock]
-                    if self.connected and self.tcp_sock is not None:
+                    sockets_to_watch = []
+                    if self.udp_sock is not None and getattr(self.udp_sock, "fileno", lambda: -1)() != -1:
+                        sockets_to_watch.append(self.udp_sock)
+                    if self.connected and self.tcp_sock is not None and getattr(self.tcp_sock, "fileno", lambda: -1)() != -1:
                         sockets_to_watch.append(self.tcp_sock)
+
+                    if not sockets_to_watch:
+                        time.sleep(0.05)
+                        continue
 
                     # Multiplexage non bloquant via select (50ms)
                     try:
                         readable, _, exceptional = select.select(sockets_to_watch, [], sockets_to_watch, 0.05)
-                    except (OSError, ValueError, select.error) as select_err:
+                    except (OSError, ValueError, TypeError, select.error) as select_err:
                         if not self.running:
                             break
-                        logger.warning(f"[ClientNode] Erreur select client : {select_err}")
-                        if self.tcp_sock and self.tcp_sock.fileno() == -1:
+                        if self.tcp_sock and getattr(self.tcp_sock, "fileno", lambda: -1)() == -1:
                             self._deconnecter_tcp("socket fermée invalide")
                         continue
 
@@ -421,6 +445,13 @@ class ClientNode(QThread):
                         self.trame_reseau_log.emit("TX", "UDP", int(t_seq), len(raw_data), str(t_type))
                     except Exception:
                         self.trame_reseau_log.emit("TX", "UDP", 0, len(raw_data), "UDP")
+                except (ConnectionResetError, BlockingIOError):
+                    pass
+                except OSError as e_udp:
+                    if getattr(e_udp, "winerror", None) == 10054 or e_udp.errno in (10054, 10038, 9):
+                        pass
+                    else:
+                        logger.error(f"[ClientNode] Erreur d'expédition UDP : {e_udp}", exc_info=True)
                 except Exception as e_udp:
                     logger.error(f"[ClientNode] Erreur d'expédition UDP : {e_udp}", exc_info=True)
 
@@ -429,7 +460,6 @@ class ClientNode(QThread):
                     if not self._send_raw_tcp(raw_data):
                         non_envoyes.append((msg_proto, raw_data))
                         self._deconnecter_tcp("échec sendall TCP")
-                        break
                     else:
                         try:
                             tr = json.loads(raw_data.decode("utf-8", errors="ignore").strip())
@@ -439,9 +469,8 @@ class ClientNode(QThread):
                         except Exception:
                             self.trame_reseau_log.emit("TX", "TCP", 0, len(raw_data), "TCP")
                 else:
-                    # Serveur déconnecté : conserver le message TCP pour le rejouer
+                    # Serveur déconnecté : conserver le message TCP sans faire break pour expédier tous les UDP
                     non_envoyes.append((msg_proto, raw_data))
-                    break
 
         # Réenfiler les messages TCP non expédiés pour le prochain cycle (dans l'ordre FIFO)
         if non_envoyes:
@@ -452,8 +481,8 @@ class ClientNode(QThread):
                 except queue.Empty:
                     break
 
-            # Limite globale pour éviter une consommation mémoire infinie (max 100 messages en file)
-            fusion = (non_envoyes + elements_restants)[-100:]
+            # Limite globale pour éviter une saturation (max 50 messages en file)
+            fusion = (non_envoyes + elements_restants)[-50:]
             for elem in fusion:
                 self.msg_queue.put(elem)
 
@@ -601,10 +630,10 @@ class ClientNode(QThread):
 
             self._handle_udp_frame(frame, addr)
 
-        except BlockingIOError:
+        except (BlockingIOError, ConnectionResetError):
             pass
         except OSError as e:
-            if not self.running or e.errno in (10038, 9):
+            if not self.running or e.errno in (10038, 9, 10054) or getattr(e, "winerror", None) == 10054:
                 return
             logger.error(f"[ClientNode] Erreur de réception UDP : {e}", exc_info=True)
         except Exception as e:
@@ -715,12 +744,12 @@ class ClientNode(QThread):
                     resolved_urg = 1
 
             now = time.time()
-            alert_tuple = (resolved_axe_x, resolved_pos[0], resolved_pos[1], resolved_type, resolved_urg)
-            # Émission immédiate si changement d'alerte, sinon limitation à 200ms pour les redites de moteur.py
-            if not self.vta_active or (getattr(self, "_last_vta_tuple", None) != alert_tuple) or (now - self.last_vta_sent > 0.2):
+            core_tuple = (resolved_axe_x, resolved_type, resolved_urg)
+            # Émission immédiate lors d'un déclenchement ou changement d'axe/urgence, cadencée à 100ms pour le suivi GPS
+            if not self.vta_active or (getattr(self, "_last_vta_core", None) != core_tuple) or (now - self.last_vta_sent > 0.1):
                 self.vta_active = True
                 self.last_vta_sent = now
-                self._last_vta_tuple = alert_tuple
+                self._last_vta_core = core_tuple
 
                 payload = {
                     "axe_x": resolved_axe_x,
@@ -744,6 +773,7 @@ class ClientNode(QThread):
         try:
             if self.vta_active:
                 self.vta_active = False
+                self._last_vta_core = None
                 self._last_vta_tuple = None
                 payload = {}
                 frame = self._build_frame("vta_end", payload)
@@ -776,12 +806,15 @@ class ClientNode(QThread):
             frame = self._build_frame("metrics", payload)
             raw = (json.dumps(frame) + "\n").encode("utf-8")
 
-            # Limitation de la taille de file d'attente à 100 éléments
-            if self.msg_queue.qsize() < 100:
-                self.msg_queue.put(("TCP", raw))
-                logger.debug(f"[ClientNode][METRIQUES-SEND] Enfilé : {count} véhicules, {avg_speed:.1f} km/h")
-            else:
-                logger.warning("[ClientNode] File d'attente de métriques saturée (>100). Trame ignorée.")
+            # Limitation de la taille de file d'attente à 50 éléments (dépilement silencieux du plus ancien)
+            while self.msg_queue.qsize() >= 50:
+                try:
+                    self.msg_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+            self.msg_queue.put(("TCP", raw))
+            logger.debug(f"[ClientNode][METRIQUES-SEND] Enfilé : {count} véhicules, {avg_speed:.1f} km/h")
 
         except Exception as e:
             logger.error(f"[ClientNode] Erreur lors de la préparation des métriques : {e}", exc_info=True)
@@ -838,6 +871,6 @@ class ClientNode(QThread):
         """Arrête proprement le thread client et attend sa terminaison."""
         logger.info("[ClientNode] Signal d'arrêt reçu. Fermeture des communications...")
         self.running = False
-        self._fermer_sockets()
         if self.isRunning():
-            self.wait(2000)
+            self.wait(1500)
+        self._fermer_sockets()

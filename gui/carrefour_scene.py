@@ -14,7 +14,7 @@ import math
 import random
 
 import PyQt6.sip as sip
-from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
 )
 
 from simulation.intersection import CouleurFeu, IntersectionManager
-from simulation.vehicules import EntitePhysique, TypeVehicule
+from simulation.vehicules import EntitePhysique, TypeVehicule, Vehicule
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +122,10 @@ class CarrefourView(QGraphicsView):
         super().resizeEvent(event)
         self.fit_scene()
 
+    def mouseMoveEvent(self, event):
+        """Transmet systématiquement les événements de mouvement souris à CarrefourScene."""
+        super().mouseMoveEvent(event)
+
     def showEvent(self, event):
         """Ajuste la vue dès son apparition à l'écran."""
         super().showEvent(event)
@@ -153,7 +157,8 @@ class CarrefourScene(QGraphicsScene):
 
     def __init__(self, parent=None):
         """Initialise la scène graphique, son repère métrique et le décor Smart City."""
-        super().__init__(parent)
+        super().__init__(parent if isinstance(parent, QObject) else None)
+        self.main_window = parent
 
         # Définition du cadre spatial (-500px à +500px, soit 100m x 100m)
         self.setSceneRect(-500, -500, 1000, 1000)
@@ -187,6 +192,8 @@ class CarrefourScene(QGraphicsScene):
 
         self.hologramme = None
         self.type_hologramme = None
+        self.v2i_tapis_corridor = None
+        self.v2i_chevrons = []
 
         self._draw_infrastructure()
 
@@ -228,6 +235,7 @@ class CarrefourScene(QGraphicsScene):
             self.type_hologramme = None
 
             super().clear()
+            self._draw_infrastructure()
         except Exception as e:
             logger.error(f"[CarrefourScene] Erreur lors du nettoyage de la scène : {e}", exc_info=True)
 
@@ -716,6 +724,23 @@ class CarrefourScene(QGraphicsScene):
                 self.rsu_balise, self.rsu_label
             ]
 
+            # Tapis lumineux « Onde Verte V2I » (couloir vert translucide + chevrons animés)
+            pen_tapis = QPen(QColor(0, 255, 136, 140), 1.5, Qt.PenStyle.DashLine)
+            self.v2i_tapis_corridor = self.addPath(QPainterPath(), pen_tapis, QBrush(QColor(0, 255, 136, 45)))
+            self.v2i_tapis_corridor.setZValue(6)
+            self.v2i_tapis_corridor.setVisible(False)
+
+            self.v2i_chevrons = []
+            for _ in range(16):
+                ch = self.addPath(
+                    QPainterPath(),
+                    QPen(QColor(0, 255, 136, 220), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap),
+                    QBrush(Qt.GlobalColor.transparent)
+                )
+                ch.setZValue(7)
+                ch.setVisible(False)
+                self.v2i_chevrons.append(ch)
+
             # Faisceau de transmission V2X (VTA -> RSU) et badge flottant
             pen_v2x = QPen(QColor("#EF4444"), 2, Qt.PenStyle.DashLine)
             self.v2x_beam = self.addLine(0, 0, 0, 0, pen_v2x)
@@ -839,6 +864,41 @@ class CarrefourScene(QGraphicsScene):
             vitre = self.addRect(-largeur_px / 6, -hauteur_px / 4, largeur_px / 3, hauteur_px / 2, QPen(Qt.PenStyle.NoPen), QBrush(QColor("#38BDF8")))
             vitre.setParentItem(group)
 
+            # Feux Stop arrière (deux optiques rouges lumineuses à l'arrière)
+            feu_stop_g = self.addRect(-largeur_px / 2, -hauteur_px / 2 + 1, 3.5, 3.0, QPen(Qt.PenStyle.NoPen), QBrush(QColor("#450A0A")))
+            feu_stop_g.setParentItem(group)
+            feu_stop_d = self.addRect(-largeur_px / 2, hauteur_px / 2 - 4, 3.5, 3.0, QPen(Qt.PenStyle.NoPen), QBrush(QColor("#450A0A")))
+            feu_stop_d.setParentItem(group)
+
+            # Clignotants orange (4 optiques : avant-gauche, arrière-gauche, avant-droit, arrière-droit)
+            clign_av_g = self.addRect(largeur_px / 2 - 4, -hauteur_px / 2, 3.5, 3.0, QPen(Qt.PenStyle.NoPen), QBrush(Qt.GlobalColor.transparent))
+            clign_av_g.setParentItem(group)
+            clign_ar_g = self.addRect(-largeur_px / 2, -hauteur_px / 2, 3.5, 3.0, QPen(Qt.PenStyle.NoPen), QBrush(Qt.GlobalColor.transparent))
+            clign_ar_g.setParentItem(group)
+            clign_av_d = self.addRect(largeur_px / 2 - 4, hauteur_px / 2 - 3, 3.5, 3.0, QPen(Qt.PenStyle.NoPen), QBrush(Qt.GlobalColor.transparent))
+            clign_av_d.setParentItem(group)
+            clign_ar_d = self.addRect(-largeur_px / 2, hauteur_px / 2 - 3, 3.5, 3.0, QPen(Qt.PenStyle.NoPen), QBrush(Qt.GlobalColor.transparent))
+            clign_ar_d.setParentItem(group)
+
+            # Feux de détresse / Panne (icône ⚠️)
+            font_panne = QFont("Segoe UI", 9, QFont.Weight.Bold)
+            font_panne.setPointSize(9)
+            panne_label = self.addSimpleText("⚠️", font_panne)
+            panne_label.setBrush(QBrush(QColor("#F59E0B")))
+            panne_label.setPos(-8, -hauteur_px / 2 - 16)
+            panne_label.setVisible(False)
+            panne_label.setParentItem(group)
+
+            group.feux = {
+                "stop_g": feu_stop_g,
+                "stop_d": feu_stop_d,
+                "clign_av_g": clign_av_g,
+                "clign_ar_g": clign_ar_g,
+                "clign_av_d": clign_av_d,
+                "clign_ar_d": clign_ar_d,
+                "panne_label": panne_label,
+            }
+
         # Hitbox transparente pour la sélection par clic
         hitbox = self.addRect(
             -largeur_px / 2 - 5, -hauteur_px / 2 - 5, largeur_px + 10, hauteur_px + 10,
@@ -848,6 +908,7 @@ class CarrefourScene(QGraphicsScene):
         hitbox.setData(0, "mobile")
         hitbox.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        group.hitbox = hitbox
         group.setZValue(20)
         return group, hitbox
 
@@ -857,7 +918,7 @@ class CarrefourScene(QGraphicsScene):
         if pool:
             vue = pool.pop()
             vue.setVisible(True)
-            hitbox = vue.childItems()[-1] if vue.childItems() else vue
+            hitbox = getattr(vue, "hitbox", None) or (vue.childItems()[-1] if vue.childItems() else vue)
             return vue, hitbox
         return self._create_vehicle_view(entite)
 
@@ -886,7 +947,7 @@ class CarrefourScene(QGraphicsScene):
                     b_bg.setPen(QPen(coul_badge, 1))
 
             # 2. Animation des ondes radio RSU
-            active_v2i = getattr(self, "preemption_v2i_active", True)
+            active_v2i = getattr(inter, "preemption_v2i_active", getattr(self, "preemption_v2i_active", True))
             couleur_ondes = QColor(0, 229, 255, 140) if active_v2i else QColor(100, 116, 139, 40)
             for idx, onde in enumerate(self.rsu_ondes):
                 r_onde = ((self.tick_lumiere * 1.5 + idx * 25) % 100)
@@ -917,6 +978,35 @@ class CarrefourScene(QGraphicsScene):
 
                 vue.setPos(px, py)
                 vue.setRotation(cap_deg)
+
+                # Rendu dynamique des feux Stop, clignotants 4 Hz et détresse
+                if hasattr(vue, "feux"):
+                    feux = vue.feux
+                    is_braking = getattr(ent, 'freinage_mecanique', False) or (getattr(ent, 'vitesse', 0.0) < 0.2)
+                    coul_stop = QColor("#FF1744") if is_braking else QColor("#450A0A")
+                    feux["stop_g"].setBrush(QBrush(coul_stop))
+                    feux["stop_d"].setBrush(QBrush(coul_stop))
+
+                    import time
+                    clign_on = (int(time.time() * 8) % 2 == 0)
+                    en_panne = getattr(ent, 'en_panne', False)
+                    ind_vir = getattr(ent, 'indicateur_virage', 0)
+                    etat_dep = getattr(ent, 'etat_depassement', 0)
+
+                    clign_gauche = en_panne or (ind_vir == -1) or (etat_dep == 1)
+                    clign_droit = en_panne or (ind_vir == 1) or (etat_dep == 2)
+
+                    b_orange = QBrush(QColor("#FF9100"))
+                    b_vide = QBrush(Qt.GlobalColor.transparent)
+
+                    feux["clign_av_g"].setBrush(b_orange if (clign_gauche and clign_on) else b_vide)
+                    feux["clign_ar_g"].setBrush(b_orange if (clign_gauche and clign_on) else b_vide)
+                    feux["clign_av_d"].setBrush(b_orange if (clign_droit and clign_on) else b_vide)
+                    feux["clign_ar_d"].setBrush(b_orange if (clign_droit and clign_on) else b_vide)
+
+                    feux["panne_label"].setVisible(en_panne)
+                    if en_panne:
+                        feux["panne_label"].setRotation(-cap_deg)
 
                 if eid == id_selectionne:
                     veh_sel = ent
@@ -952,6 +1042,71 @@ class CarrefourScene(QGraphicsScene):
                 self.v2x_beam.setVisible(False)
                 self.v2x_label_bg.setVisible(False)
                 self.v2x_label.setVisible(False)
+
+            # 4bis. Tapis lumineux « Onde Verte V2I » sur la chaussée
+            if vta_proche is not None and active_v2i:
+                cap_vta = vta_proche.cap
+                cos_c = math.cos(cap_vta)
+                sin_c = math.sin(cap_vta)
+                u = (cos_c, sin_c)
+                n = (-sin_c, cos_c)
+
+                vta_px = vta_proche.pos_x * self.PIXELS_PAR_METRE
+                vta_py = vta_proche.pos_y * self.PIXELS_PAR_METRE
+
+                proj_vta = vta_px * u[0] + vta_py * u[1]
+                sortie_long = 22.0 * self.PIXELS_PAR_METRE
+                longueur_tapis = max(60.0, sortie_long - proj_vta + 20.0)
+
+                p_start_x = vta_px - 15.0 * u[0]
+                p_start_y = vta_py - 15.0 * u[1]
+                p_end_x = p_start_x + longueur_tapis * u[0]
+                p_end_y = p_start_y + longueur_tapis * u[1]
+
+                demi_larg = 17.0
+                c1 = QPointF(p_start_x + demi_larg * n[0], p_start_y + demi_larg * n[1])
+                c2 = QPointF(p_end_x + demi_larg * n[0], p_end_y + demi_larg * n[1])
+                c3 = QPointF(p_end_x - demi_larg * n[0], p_end_y - demi_larg * n[1])
+                c4 = QPointF(p_start_x - demi_larg * n[0], p_start_y - demi_larg * n[1])
+
+                tapis_path = QPainterPath()
+                tapis_path.moveTo(c1)
+                tapis_path.lineTo(c2)
+                tapis_path.lineTo(c3)
+                tapis_path.lineTo(c4)
+                tapis_path.closeSubpath()
+
+                if hasattr(self, "v2i_tapis_corridor") and self.v2i_tapis_corridor is not None:
+                    self.v2i_tapis_corridor.setPath(tapis_path)
+                    self.v2i_tapis_corridor.setVisible(True)
+
+                pas_chev = 36.0
+                anim_offset = (self.tick_lumiere * 2.8) % pas_chev
+                for idx, ch in enumerate(getattr(self, "v2i_chevrons", [])):
+                    dist_ch = anim_offset + idx * pas_chev
+                    if dist_ch < (longueur_tapis - 10.0):
+                        cx = p_start_x + dist_ch * u[0]
+                        cy = p_start_y + dist_ch * u[1]
+
+                        tip = QPointF(cx + 9.0 * u[0], cy + 9.0 * u[1])
+                        w1 = QPointF(cx - 7.0 * u[0] + 11.0 * n[0], cy - 7.0 * u[1] + 11.0 * n[1])
+                        w2 = QPointF(cx - 7.0 * u[0] - 11.0 * n[0], cy - 7.0 * u[1] - 11.0 * n[1])
+
+                        ch_path = QPainterPath()
+                        ch_path.moveTo(w1)
+                        ch_path.lineTo(tip)
+                        ch_path.lineTo(w2)
+
+                        ch.setPath(ch_path)
+                        ch.setVisible(True)
+                    else:
+                        ch.setVisible(False)
+            else:
+                if hasattr(self, "v2i_tapis_corridor") and self.v2i_tapis_corridor is not None:
+                    self.v2i_tapis_corridor.setVisible(False)
+                if hasattr(self, "v2i_chevrons"):
+                    for ch in self.v2i_chevrons:
+                        ch.setVisible(False)
 
             # 5. Cône LiDAR et HUD flottant sur véhicule sélectionné
             if veh_sel is not None:
@@ -1063,29 +1218,39 @@ class CarrefourScene(QGraphicsScene):
         except Exception as e:
             logger.error(f"[CarrefourScene] Erreur mettre_a_jour_entites: {e}", exc_info=True)
 
+    def supprimer_hologramme(self):
+        """Supprime ou masque l'hologramme de prévisualisation Cyber-SCADA."""
+        if getattr(self, "hologramme", None) is not None:
+            try:
+                self.removeItem(self.hologramme)
+                if not sip.isdeleted(self.hologramme):
+                    sip.delete(self.hologramme)
+            except Exception:
+                pass
+            self.hologramme = None
+            self.type_hologramme = None
+
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
-        """Gère le survol de la souris pour actualiser le gabarit de prévisualisation."""
+        """Gère le survol de la souris pour actualiser le gabarit de prévisualisation Cyber-SCADA."""
         try:
             super().mouseMoveEvent(event)
-            fenetre = self.parent()
+            fenetre = getattr(self, "main_window", None) or self.parent()
             if not fenetre or not hasattr(fenetre, "type_a_placer"):
                 return
 
             type_selectionne = fenetre.type_a_placer
             if type_selectionne is None:
-                if self.hologramme is not None:
-                    self.removeItem(self.hologramme)
-                    if not sip.isdeleted(self.hologramme):
-                        sip.delete(self.hologramme)
-                    self.hologramme = None
-                    self.type_hologramme = None
+                self.supprimer_hologramme()
                 return
 
             scene_pos = event.scenePos()
             x = scene_pos.x() / self.PIXELS_PAR_METRE
             y = scene_pos.y() / self.PIXELS_PAR_METRE
 
-            voie = fenetre.dashboard.combo_voie_spawn.currentText()
+            voie = ""
+            if hasattr(fenetre, "dashboard") and hasattr(fenetre.dashboard, "combo_voie_spawn"):
+                voie = fenetre.dashboard.combo_voie_spawn.currentText()
+
             pos_x, pos_y, cap = x, y, 0.0
 
             if voie == "Passage Piéton" or type_selectionne == TypeVehicule.PIETON:
@@ -1098,50 +1263,77 @@ class CarrefourScene(QGraphicsScene):
                     pos_y = 9.0 if y > 0 else -9.0
                     cap = 0.0 if x < 0 else math.pi
             elif voie == "Nord -> Sud":
-                pos_x = -2.0
+                pos_x = -3.6 if type_selectionne == TypeVehicule.CYCLISTE else -2.0
                 pos_y = y
                 cap = math.pi / 2
             elif voie == "Sud -> Nord":
-                pos_x = 2.0
+                pos_x = 3.6 if type_selectionne == TypeVehicule.CYCLISTE else 2.0
                 pos_y = y
                 cap = -math.pi / 2
             elif voie == "Est -> Ouest":
-                pos_y = -2.0
+                pos_y = -3.6 if type_selectionne == TypeVehicule.CYCLISTE else -2.0
                 pos_x = x
                 cap = math.pi
             elif voie == "Ouest -> Est":
-                pos_y = 2.0
+                pos_y = 3.6 if type_selectionne == TypeVehicule.CYCLISTE else 2.0
                 pos_x = x
                 cap = 0.0
             else:
+                lat = 3.6 if type_selectionne == TypeVehicule.CYCLISTE else 2.0
                 if abs(y) < abs(x):
                     pos_x = x
-                    pos_y = 2.0 if y > 0 else -2.0
+                    pos_y = lat if y > 0 else -lat
                     cap = 0.0 if pos_y > 0 else math.pi
                 else:
                     pos_y = y
-                    pos_x = 2.0 if x > 0 else -2.0
+                    pos_x = lat if x > 0 else -lat
                     cap = math.pi / 2 if pos_x < 0 else -math.pi / 2
 
             if self.hologramme is None or self.type_hologramme != type_selectionne:
-                if self.hologramme is not None:
-                    self.removeItem(self.hologramme)
-                    if not sip.isdeleted(self.hologramme):
-                        sip.delete(self.hologramme)
+                self.supprimer_hologramme()
 
-                largeur_px = 4.0 * self.PIXELS_PAR_METRE
-                hauteur_px = 2.0 * self.PIXELS_PAR_METRE
-                if type_selectionne == TypeVehicule.POIDS_LOURD:
-                    largeur_px = 10.0 * self.PIXELS_PAR_METRE
-                elif type_selectionne == TypeVehicule.PIETON:
-                    largeur_px, hauteur_px = 5.0, 5.0
-                elif type_selectionne == TypeVehicule.CYCLISTE:
-                    largeur_px, hauteur_px = 15.0, 5.0
+                dummy = Vehicule("preview", v_type=type_selectionne)
+                long_m, larg_m = dummy.longueur_m, dummy.largeur_m
 
-                self.hologramme = QGraphicsRectItem(-largeur_px / 2, -hauteur_px / 2, largeur_px, hauteur_px)
-                self.hologramme.setBrush(QBrush(QColor(255, 255, 255, 120)))
-                self.hologramme.setPen(QPen(QColor(0, 229, 255), 2, Qt.PenStyle.DashLine))
-                self.addItem(self.hologramme)
+                long_px = long_m * self.PIXELS_PAR_METRE
+                larg_px = larg_m * self.PIXELS_PAR_METRE
+
+                # Rectangle hologramme Blueprint Cyber-SCADA
+                holo_rect = self.addRect(
+                    -long_px / 2, -larg_px / 2, long_px, larg_px,
+                    QPen(QColor("#00E5FF"), 2, Qt.PenStyle.DashLine),
+                    QBrush(QColor(0, 229, 255, 90))
+                )
+                holo_rect.setZValue(35)
+                holo_rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+                # Flèche blanche indiquant le cap de départ
+                fleche_path = QPainterPath()
+                fleche_path.moveTo(-long_px * 0.25, 0)
+                fleche_path.lineTo(long_px * 0.35, 0)
+                fleche_path.lineTo(long_px * 0.15, -larg_px * 0.3)
+                fleche_path.moveTo(long_px * 0.35, 0)
+                fleche_path.lineTo(long_px * 0.15, larg_px * 0.3)
+                fleche = self.addPath(
+                    fleche_path,
+                    QPen(QColor(255, 255, 255, 240), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+                )
+                fleche.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                fleche.setParentItem(holo_rect)
+
+                # Petit texte au-dessus : [Placer: NOM_TYPE | Clic Gauche]
+                nom_type = type_selectionne.name if hasattr(type_selectionne, "name") else str(type_selectionne)
+                font_holo = QFont("Segoe UI", 8, QFont.Weight.Bold)
+                font_holo.setPointSize(8)
+                texte_holo = self.addSimpleText(f"[Placer: {nom_type} | Clic Gauche]", font_holo)
+                texte_holo.setBrush(QBrush(QColor("#00E5FF")))
+                texte_holo.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                t_w = texte_holo.boundingRect().width()
+                t_h = texte_holo.boundingRect().height()
+                texte_holo.setPos(-t_w / 2, -larg_px / 2 - t_h - 4)
+                texte_holo.setParentItem(holo_rect)
+
+                self.hologramme = holo_rect
                 self.type_hologramme = type_selectionne
 
             self.hologramme.setPos(pos_x * self.PIXELS_PAR_METRE, pos_y * self.PIXELS_PAR_METRE)

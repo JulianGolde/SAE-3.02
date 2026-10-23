@@ -193,6 +193,8 @@ class MoteurSimulation(QThread):
         self.temps_vehicules_traverses = []
         self.vehicules_franchis_total = 0
         self._vehicules_entree_carrefour = {}
+        self.temps_dernier_spawn = 0.0
+        self.cpt_id = 9000
 
     @property
     def temps_franchissement_moyen_vta(self) -> float:
@@ -226,6 +228,26 @@ class MoteurSimulation(QThread):
                 entite.cap_cible = entite.cap
                 entite.est_axe_x = abs(math.cos(entite.cap)) > 0.5
                 entite.etat_depassement = 0
+
+                # Cantonnage strict des cyclistes sur piste cyclable latérale (+/- 3.6 m)
+                if getattr(entite, 'type_entite', None) == TypeVehicule.CYCLISTE:
+                    entite.action_intersection = None
+                    entite.en_virage_bezier = False
+                    entite.trajectoire_bezier = None
+                    if entite.est_axe_x:
+                        sign = 1.0 if math.cos(entite.cap) > 0 else -1.0
+                        entite.pos_y = 3.6 * sign
+                        entite.voie_cible_y = entite.pos_y
+                    else:
+                        sign = 1.0 if math.sin(entite.cap) > 0 else -1.0
+                        entite.pos_x = -3.6 * sign
+                        entite.voie_cible_x = entite.pos_x
+
+                # Véhicule d'urgence VTA : toujours tout droit
+                if getattr(entite, 'type_entite', None) == TypeVehicule.VIG_VTA:
+                    entite.action_intersection = None
+                    entite.en_virage_bezier = False
+                    entite.trajectoire_bezier = None
 
                 self.entites.append(entite)
             except Exception as e:
@@ -324,6 +346,8 @@ class MoteurSimulation(QThread):
             points_autre = self.calculer_points_physiques(autre)
             if entite.type_entite == TypeVehicule.VIG_VTA:
                 largeur_couloir = 1.0  # Max 1.0 m pour le VTA dans le couloir central
+            elif autre.type_entite == TypeVehicule.CYCLISTE and entite.type_entite != TypeVehicule.CYCLISTE:
+                largeur_couloir = 1.1  # Piste cyclable latérale séparée de 1.6m : aucun ralentissement des voitures/camions
             else:
                 largeur_couloir = (entite.largeur_m / 2.0) + (autre.largeur_m / 2.0) + 0.6
 
@@ -352,31 +376,41 @@ class MoteurSimulation(QThread):
         """Règle 5 : Vérifie si la voie de sortie du carrefour est encombrée avant de s'y engager.
 
         Returns:
-            bool: True si la voie de sortie est encombrée à moins de 12 m derrière le carrefour.
+            bool: True si la voie de sortie est encombrée par un véhicule à l'arrêt dans le même sens.
         """
-        cap_sortie = getattr(entite, 'action_intersection', None)
-        if cap_sortie is None:
-            cap_sortie = getattr(entite, 'cap_cible', entite.cap)
+        cap_cible = getattr(entite, 'action_intersection', None)
+        if cap_cible is None:
+            cap_cible = getattr(entite, 'cap_cible', entite.cap)
 
-        est_sortie_x = abs(math.cos(cap_sortie)) > 0.5
+        est_sortie_x = abs(math.cos(cap_cible)) > 0.5
 
         for autre in autres_entites:
             if getattr(autre, 'id_entite', None) == entite.id_entite:
                 continue
-            if getattr(autre, 'type_entite', None) == TypeVehicule.PIETON:
+            if getattr(autre, 'type_entite', None) in (TypeVehicule.PIETON, TypeVehicule.CYCLISTE):
                 continue
 
-            # Vérification de la présence dans la zone de sortie immédiate ([10m, 22m] du centre)
-            if est_sortie_x:
-                sens_x = 1 if math.cos(cap_sortie) > 0 else -1
-                voie_y = 2.0 if sens_x > 0 else -2.0
-                dans_sortie = (10.0 <= autre.pos_x * sens_x <= 22.0) and abs(autre.pos_y - voie_y) < 1.5
-            else:
-                sens_y = 1 if math.sin(cap_sortie) > 0 else -1
-                voie_x = -2.0 if sens_y > 0 else 2.0
-                dans_sortie = (10.0 <= autre.pos_y * sens_y <= 22.0) and abs(autre.pos_x - voie_x) < 1.5
+            # Véhicule allant dans le même sens (math.cos(entite.cap_cible - autre.cap) > 0.8)
+            if math.cos(cap_cible - autre.cap) <= 0.8:
+                continue
 
-            if dans_sortie and getattr(autre, 'vitesse', 0.0) < 1.5:
+            # Complètement à l'arrêt (< 0.3 m/s)
+            if getattr(autre, 'vitesse', 0.0) >= 0.3:
+                continue
+
+            # Juste à la sortie immédiate du carrefour (10.0 < dist_sortie < 16.0 m)
+            if est_sortie_x:
+                sens_x = 1 if math.cos(cap_cible) > 0 else -1
+                voie_y = 2.0 if sens_x > 0 else -2.0
+                dist_sortie = autre.pos_x * sens_x
+                dans_sortie = (10.0 < dist_sortie < 16.0) and abs(autre.pos_y - voie_y) < 1.5
+            else:
+                sens_y = 1 if math.sin(cap_cible) > 0 else -1
+                voie_x = -2.0 if sens_y > 0 else 2.0
+                dist_sortie = autre.pos_y * sens_y
+                dans_sortie = (10.0 < dist_sortie < 16.0) and abs(autre.pos_x - voie_x) < 1.5
+
+            if dans_sortie:
                 return True
 
         return False
@@ -443,58 +477,80 @@ class MoteurSimulation(QThread):
 
         # 3. Génération automatique cadencée des véhicules
         try:
-            maintenant = time.time()
-            if not hasattr(self, 'temps_dernier_spawn'):
-                self.temps_dernier_spawn = maintenant
+            maintenant = self.temps_ecoule
+            if not hasattr(self, 'cpt_id'):
                 self.cpt_id = 9000
-            elif maintenant - self.temps_dernier_spawn > 2.0:
-                self.temps_dernier_spawn = maintenant
-                self.cpt_id += 1
+            ref_temps = getattr(self, 'temps_dernier_spawn', 0.0)
+            if ref_temps > 1e8:
+                declencher_spawn = (time.time() - ref_temps > 2.5)
+                if declencher_spawn:
+                    self.temps_dernier_spawn = time.time()
+            else:
+                declencher_spawn = (maintenant - ref_temps >= 2.5) or (ref_temps == 0.0 and len(copie_entites) == 0)
+                if declencher_spawn:
+                    self.temps_dernier_spawn = maintenant
 
-                type_aleatoire = random.choice([
-                    TypeVehicule.VOITURE,
-                    TypeVehicule.VOITURE,
-                    TypeVehicule.POIDS_LOURD,
-                    TypeVehicule.CYCLISTE,
-                ])
-
-                masse = 1500.0
-                if type_aleatoire == TypeVehicule.VOITURE:
-                    masse = max(800.0, random.gauss(1500.0, 200.0))
-                elif type_aleatoire == TypeVehicule.POIDS_LOURD:
-                    masse = max(10000.0, random.gauss(25000.0, 3000.0))
-                elif type_aleatoire == TypeVehicule.CYCLISTE:
-                    masse = max(40.0, random.gauss(90.0, 15.0))
-
-                nouveau_vehicule = Vehicule(str(self.cpt_id), type_aleatoire, masse)
-                axe = random.choice(['x', 'y'])
-                sens = random.choice([1, -1])
-
-                if axe == 'x':
-                    nouveau_vehicule.pos_x = -48.0 * sens
-                    nouveau_vehicule.pos_y = 2.0 * sens
-                    nouveau_vehicule.cap = 0.0 if sens == 1 else math.pi
+            if declencher_spawn:
+                if len(copie_entites) >= 12:
+                    pass
                 else:
-                    nouveau_vehicule.pos_y = -48.0 * sens
-                    nouveau_vehicule.pos_x = -2.0 * sens
-                    nouveau_vehicule.cap = math.pi / 2 if sens == 1 else -math.pi / 2
+                    self.cpt_id += 1
 
-                nouveau_vehicule.vitesse = 10.0
+                    type_aleatoire = random.choices(
+                        [TypeVehicule.VOITURE, TypeVehicule.POIDS_LOURD, TypeVehicule.CYCLISTE],
+                        weights=[0.70, 0.15, 0.15],
+                        k=1
+                    )[0]
 
-                chevauchement = False
-                for entite_existante in copie_entites:
-                    if math.hypot(
-                        entite_existante.pos_x - nouveau_vehicule.pos_x,
-                        entite_existante.pos_y - nouveau_vehicule.pos_y,
-                    ) < 15.0:
-                        chevauchement = True
-                        break
+                    masse = 1500.0
+                    if type_aleatoire == TypeVehicule.VOITURE:
+                        masse = max(800.0, random.gauss(1500.0, 200.0))
+                    elif type_aleatoire == TypeVehicule.POIDS_LOURD:
+                        masse = max(10000.0, random.gauss(25000.0, 3000.0))
+                    elif type_aleatoire == TypeVehicule.CYCLISTE:
+                        masse = max(40.0, random.gauss(90.0, 15.0))
 
-                if not chevauchement:
-                    if random.random() < 0.20:
-                        direction_virage = random.choice([-math.pi / 2, math.pi / 2])
-                        nouveau_vehicule.action_intersection = nouveau_vehicule.cap + direction_virage
-                    self.ajouter_entite(nouveau_vehicule)
+                    nouveau_vehicule = Vehicule(str(self.cpt_id), type_aleatoire, masse)
+                    axe = random.choice(['x', 'y'])
+                    sens = random.choice([1, -1])
+
+                    if type_aleatoire == TypeVehicule.CYCLISTE:
+                        if axe == 'x':
+                            nouveau_vehicule.pos_x = -48.0 * sens
+                            nouveau_vehicule.pos_y = 3.6 * sens
+                            nouveau_vehicule.cap = 0.0 if sens == 1 else math.pi
+                        else:
+                            nouveau_vehicule.pos_y = -48.0 * sens
+                            nouveau_vehicule.pos_x = -3.6 * sens
+                            nouveau_vehicule.cap = math.pi / 2 if sens == 1 else -math.pi / 2
+                        nouveau_vehicule.vitesse = 5.5
+                        nouveau_vehicule.action_intersection = None
+                        nouveau_vehicule.en_virage_bezier = False
+                    else:
+                        if axe == 'x':
+                            nouveau_vehicule.pos_x = -48.0 * sens
+                            nouveau_vehicule.pos_y = 2.0 * sens
+                            nouveau_vehicule.cap = 0.0 if sens == 1 else math.pi
+                        else:
+                            nouveau_vehicule.pos_y = -48.0 * sens
+                            nouveau_vehicule.pos_x = -2.0 * sens
+                            nouveau_vehicule.cap = math.pi / 2 if sens == 1 else -math.pi / 2
+                        nouveau_vehicule.vitesse = 10.0
+
+                    chevauchement = False
+                    for entite_existante in copie_entites:
+                        if math.hypot(
+                            entite_existante.pos_x - nouveau_vehicule.pos_x,
+                            entite_existante.pos_y - nouveau_vehicule.pos_y,
+                        ) < 15.0:
+                            chevauchement = True
+                            break
+
+                    if not chevauchement:
+                        if type_aleatoire != TypeVehicule.CYCLISTE and random.random() < 0.20:
+                            direction_virage = random.choice([-math.pi / 2, math.pi / 2])
+                            nouveau_vehicule.action_intersection = nouveau_vehicule.cap + direction_virage
+                        self.ajouter_entite(nouveau_vehicule)
         except Exception as e_spawn:
             logger.error(f"[MoteurSimulation] Erreur génération automatique : {e_spawn}", exc_info=True)
 
@@ -502,6 +558,7 @@ class MoteurSimulation(QThread):
         vta_instances = [e for e in copie_entites if getattr(e, 'type_entite', None) == TypeVehicule.VIG_VTA]
         vta_proche = False
         axe_urgence_x = False
+        vta_entite = None
 
         for vta in vta_instances:
             dist_centre = math.hypot(vta.pos_x, vta.pos_y)
@@ -510,17 +567,19 @@ class MoteurSimulation(QThread):
                 if vta.est_axe_x
                 else (vta.pos_y if math.sin(vta.cap) > 0 else -vta.pos_y)
             )
-            # Approche à moins de 85 m et pas encore éloigné de plus de 15 m après le centre
-            if dist_centre < 85.0 and dist_apres_centre <= 15.0:
+            # Approche à moins de 85 m et pas encore éloigné de plus de 18 m après le centre
+            if dist_centre < 85.0 and dist_apres_centre <= 18.0:
                 vta_proche = True
                 axe_urgence_x = vta.est_axe_x
+                vta_entite = vta
                 break
 
         if vta_proche and self.preemption_v2i_active:
             self.intersection.forcer_passage_vta(axe_urgence_x)
             if self.network_client:
                 try:
-                    self.network_client.send_vta_alert(axe_urgence_x)
+                    pos_vta = [round(vta_entite.pos_x, 1), round(vta_entite.pos_y, 1)] if vta_entite else [0.0, 0.0]
+                    self.network_client.send_vta_alert(axe_urgence_x, pos_vta, "VIG_VTA", 1)
                 except Exception as e_net:
                     logger.error(f"[MoteurSimulation] Erreur envoi alerte VTA : {e_net}")
         else:
@@ -600,9 +659,57 @@ class MoteurSimulation(QThread):
                         vta_sur_meme_axe = True
                         break
 
-            if entite.type_entite != TypeVehicule.VIG_VTA:
-                # Véhicule ordinaire : s'écarte vers le bord extérieur droit (+3.3m ou -3.3m)
-                if vta_sur_meme_axe or getattr(entite, 'forcer_arret', False):
+            # Distance à la ligne d'arrêt
+            if est_axe_x:
+                dist_ligne = (
+                    -entite.pos_x - 10.0 - entite.longueur_m / 2.0
+                    if math.cos(entite.cap_cible) > 0
+                    else entite.pos_x - 10.0 - entite.longueur_m / 2.0
+                )
+            else:
+                dist_ligne = (
+                    -entite.pos_y - 10.0 - entite.longueur_m / 2.0
+                    if math.sin(entite.cap_cible) > 0
+                    else entite.pos_y - 10.0 - entite.longueur_m / 2.0
+                )
+
+            dist_centre = math.hypot(entite.pos_x, entite.pos_y)
+            est_engage_intersection = (
+                dist_centre < 9.5
+                or getattr(entite, 'trajectoire_bezier', None) is not None
+                or getattr(entite, 'en_virage_bezier', False)
+            )
+            dans_carrefour_proche = dist_centre < 11.0
+
+            # -------------------------------------------------------------
+            # RÈGLE 1 & 2 : Attribution des voies cibles (cyclistes sur piste latérale +/- 3.6m)
+            # -------------------------------------------------------------
+            if entite.type_entite == TypeVehicule.CYCLISTE:
+                entite.action_intersection = None
+                entite.en_virage_bezier = False
+                entite.trajectoire_bezier = None
+                if est_axe_x:
+                    entite.voie_cible_y = 3.6 if math.cos(entite.cap_cible) > 0 else -3.6
+                else:
+                    entite.voie_cible_x = -3.6 if math.sin(entite.cap_cible) > 0 else 3.6
+
+            elif entite.type_entite == TypeVehicule.VIG_VTA:
+                entite.action_intersection = None
+                entite.en_virage_bezier = False
+                entite.trajectoire_bezier = None
+
+            else:
+                # Véhicule ordinaire : évacuation immédiate du carrefour si VTA approche
+                if vta_proche and dans_carrefour_proche:
+                    entite.action_intersection = None
+                    entite.trajectoire_bezier = None
+                    entite.en_virage_bezier = False
+                    entite.forcer_arret = False
+                    if est_axe_x:
+                        entite.voie_cible_y = 3.3 if math.cos(entite.cap_cible) > 0 else -3.3
+                    else:
+                        entite.voie_cible_x = -3.3 if math.sin(entite.cap_cible) > 0 else 3.3
+                elif vta_sur_meme_axe or vta_proche or getattr(entite, 'forcer_arret', False):
                     if est_axe_x:
                         entite.voie_cible_y = 3.3 if math.cos(entite.cap_cible) > 0 else -3.3
                     else:
@@ -616,67 +723,69 @@ class MoteurSimulation(QThread):
             # -------------------------------------------------------------
             # RÈGLE 3 : Trajectoires de virage par courbe de Bézier quadratique
             # -------------------------------------------------------------
-            if getattr(entite, 'action_intersection', None) is not None:
-                if getattr(entite, 'trajectoire_bezier', None) is None:
-                    pts = calculer_points_bezier_virage(entite)
-                    if pts is not None:
-                        p0, p1, p2 = pts
-                        # Distance relative le long de l'axe d'approche vers P0
-                        dx = entite.pos_x - p0[0]
-                        dy = entite.pos_y - p0[1]
-                        dist_vers_p0 = -(dx * math.cos(entite.cap) + dy * math.sin(entite.cap))
-                        
-                        if (-1.5 <= dist_vers_p0 <= 0.8) or (math.hypot(dx, dy) < 2.5 and dist_vers_p0 > -2.0):
-                            # Vérification de priorité en cas de virage à gauche
-                            delta_psi = (entite.action_intersection - entite.cap + math.pi) % (2.0 * math.pi) - math.pi
-                            est_virage_gauche = (delta_psi < -0.1)
-                            priorite_bloquee = False
-                            
-                            if est_virage_gauche:
-                                for opp in copie_entites:
-                                    if opp.id_entite == entite.id_entite or opp.type_entite == TypeVehicule.PIETON:
-                                        continue
-                                    if getattr(opp, 'est_axe_x', False) == est_axe_x:
-                                        sens_oppose = (
-                                            math.cos(opp.cap) * math.cos(entite.cap)
-                                            + math.sin(opp.cap) * math.sin(entite.cap)
-                                        ) < -0.7
-                                        if sens_oppose and getattr(opp, 'action_intersection', None) is None:
-                                            if math.hypot(opp.pos_x - entite.pos_x, opp.pos_y - entite.pos_y) < 18.0:
-                                                priorite_bloquee = True
-                                                break
-                            
-                            if priorite_bloquee:
-                                distance_arret = min(distance_arret, 1.0)
-                                obstacle_nature = "Vehicule (Priorité Face)"
-                            else:
-                                # Initialisation de la courbe de Bézier quadratique
+            if getattr(entite, 'action_intersection', None) is not None and entite.type_entite not in (TypeVehicule.CYCLISTE, TypeVehicule.VIG_VTA):
+                delta_psi = (entite.action_intersection - entite.cap + math.pi) % (2.0 * math.pi) - math.pi
+                if not getattr(entite, 'en_virage_bezier', False):
+                    if dist_centre < 38.0:
+                        if delta_psi < -0.1:
+                            entite.indicateur_virage = -1
+                        elif delta_psi > 0.1:
+                            entite.indicateur_virage = 1
+                        else:
+                            entite.indicateur_virage = 0
+                    else:
+                        entite.indicateur_virage = 0
+
+                est_virage_gauche = (delta_psi < -0.1)
+
+                # La vérification de priorité en face doit se faire AVANT de franchir la ligne d'arrêt (0.0 < dist_ligne < 3.0 m)
+                priorite_bloquee = False
+                if est_virage_gauche and 0.0 < dist_ligne < 3.0:
+                    for opp in copie_entites:
+                        if opp.id_entite == entite.id_entite or opp.type_entite in (TypeVehicule.PIETON, TypeVehicule.CYCLISTE):
+                            continue
+                        if getattr(opp, 'est_axe_x', False) == est_axe_x:
+                            sens_oppose = (
+                                math.cos(opp.cap) * math.cos(entite.cap)
+                                + math.sin(opp.cap) * math.sin(entite.cap)
+                            ) < -0.7
+                            if sens_oppose and getattr(opp, 'action_intersection', None) is None:
+                                dx_opp = opp.pos_x - entite.pos_x
+                                dy_opp = opp.pos_y - entite.pos_y
+                                proj_long_opp = dx_opp * math.cos(entite.cap) + dy_opp * math.sin(entite.cap)
+                                if 0.0 < proj_long_opp < 45.0 and (opp.vitesse > 0.5 or math.hypot(opp.pos_x, opp.pos_y) < 10.5):
+                                    priorite_bloquee = True
+                                    break
+
+                if priorite_bloquee:
+                    distance_arret = min(distance_arret, dist_ligne)
+                    obstacle_nature = "Vehicule (Priorité Face)"
+                else:
+                    # Enclenchement de la trajectoire de Bézier
+                    if getattr(entite, 'trajectoire_bezier', None) is None:
+                        pts = calculer_points_bezier_virage(entite)
+                        if pts is not None:
+                            p0, p1, p2 = pts
+                            dx = entite.pos_x - p0[0]
+                            dy = entite.pos_y - p0[1]
+                            dist_vers_p0 = -(dx * math.cos(entite.cap) + dy * math.sin(entite.cap))
+                            if ((-1.5 <= dist_vers_p0 <= 0.8) or (math.hypot(dx, dy) < 2.5 and dist_vers_p0 > -2.0) or (dist_ligne <= 0.0 and dist_centre < 9.5)) and dist_vers_p0 > -6.0:
                                 entite.trajectoire_bezier = TrajectoireBezier((entite.pos_x, entite.pos_y), p1, p2)
+                                entite.en_virage_bezier = True
                                 entite.cap_cible = entite.action_intersection
+            elif not getattr(entite, 'en_virage_bezier', False):
+                entite.indicateur_virage = 0
 
             # -------------------------------------------------------------
             # SIGNALISATION LUMINEUSE & RÈGLE 5 (YELLOW BOX)
             # Immunité du VTA aux feux et à la Yellow Box uniquement si V2I active
             # -------------------------------------------------------------
-            if entite.type_entite != TypeVehicule.VIG_VTA or not self.preemption_v2i_active:
+            if (entite.type_entite != TypeVehicule.VIG_VTA or not self.preemption_v2i_active) and not est_engage_intersection:
                 couleur_feu = self.intersection.get_couleur_pour_voie(est_axe_x)
-                if est_axe_x:
-                    dist_ligne = (
-                        -entite.pos_x - 10.0 - entite.longueur_m / 2.0
-                        if math.cos(entite.cap_cible) > 0
-                        else entite.pos_x - 10.0 - entite.longueur_m / 2.0
-                    )
-                else:
-                    dist_ligne = (
-                        -entite.pos_y - 10.0 - entite.longueur_m / 2.0
-                        if math.sin(entite.cap_cible) > 0
-                        else entite.pos_y - 10.0 - entite.longueur_m / 2.0
-                    )
 
-                # Règle 5 : Yellow Box (refus d'engagement si sortie encombrée)
-                if 0.0 < dist_ligne < 45.0:
-                    sortie_encombree = self.verifier_yellow_box(entite, copie_entites)
-                    if sortie_encombree:
+                # Règle 5 : Yellow Box (uniquement quand juste devant la ligne d'arrêt : 0.5 < dist_ligne < 3.5 m)
+                if 0.5 < dist_ligne < 3.5:
+                    if self.verifier_yellow_box(entite, copie_entites):
                         distance_arret = min(distance_arret, dist_ligne)
                         obstacle_nature = "YellowBoxCarrefourEncombre"
 
@@ -699,56 +808,112 @@ class MoteurSimulation(QThread):
                 obstacle_nature = nat_obs
                 vitesse_obstacle = vit_obs
 
+            # Dégagement prioritaire absolu au milieu du carrefour :
+            if est_engage_intersection:
+                # Une fois engagé dans l'intersection ou sur sa courbe de Bézier,
+                # le véhicule ne s'arrête plus (sauf si un piéton est juste sous ses roues à < 2.5 m)
+                if obstacle_nature == "Pieton" and distance_arret < 2.5:
+                    pass
+                else:
+                    distance_arret = 999.0
+                    obstacle_nature = "Aucun"
+
             # -------------------------------------------------------------
             # GESTION DU DÉPASSEMENT VTA (COULOIR CENTRAL)
             # -------------------------------------------------------------
             if entite.type_entite == TypeVehicule.VIG_VTA:
-                # Phase 0 -> 1 : Déboîtement dans le couloir central (+0.3m ou -0.3m)
-                if getattr(entite, 'etat_depassement', 0) == 0:
-                    if obstacle_nature == "Vehicule" and distance_arret < 60.0:
-                        entite.etat_depassement = 1
-                        if est_axe_x:
-                            entite.voie_cible_y = 0.3 if math.cos(entite.cap_cible) > 0 else -0.3
-                        else:
-                            entite.voie_cible_x = -0.3 if math.sin(entite.cap_cible) > 0 else 0.3
+                if est_axe_x:
+                    voie_normale = 2.0 if math.cos(entite.cap_cible) > 0 else -2.0
+                    voie_centrale = 0.3 if math.cos(entite.cap_cible) > 0 else -0.3
+                    long_apres_centre = entite.pos_x if math.cos(entite.cap_cible) > 0 else -entite.pos_x
+                else:
+                    voie_normale = -2.0 if math.sin(entite.cap_cible) > 0 else 2.0
+                    voie_centrale = -0.3 if math.sin(entite.cap_cible) > 0 else 0.3
+                    long_apres_centre = entite.pos_y if math.sin(entite.cap_cible) > 0 else -entite.pos_y
 
-                # Phase 1 -> 2 : Maintien sur couloir central pendant le dépassement, rabattement si voie normale libre
-                elif getattr(entite, 'etat_depassement', 0) == 1:
-                    vehicule_en_cours_de_depassement = False
-                    demi_l_vta = entite.longueur_m / 2.0
-                    f_x = entite.pos_x + demi_l_vta * math.cos(entite.cap)
-                    f_y = entite.pos_y + demi_l_vta * math.sin(entite.cap)
+                etat_actuel = getattr(entite, 'etat_depassement', 0)
 
+                if etat_actuel == 0:
+                    vehicule_devant_proche = False
                     for autre in copie_entites:
                         if autre.id_entite == entite.id_entite or autre.type_entite == TypeVehicule.PIETON:
                             continue
-                        pos_autre_voie = autre.pos_y if est_axe_x else autre.pos_x
-                        meme_cote = (pos_autre_voie > 0) == (entite.pos_y > 0 if est_axe_x else entite.pos_x > 0)
-                        if meme_cote and abs(pos_autre_voie) > 1.0:
+                        if getattr(autre, 'est_axe_x', False) == est_axe_x:
+                            meme_sens = (
+                                math.cos(autre.cap) * math.cos(entite.cap)
+                                + math.sin(autre.cap) * math.sin(entite.cap)
+                            ) > 0.5
+                            if meme_sens:
+                                d_l, d_lat = self.projeter_point_repere_local(
+                                    autre.pos_x, autre.pos_y, entite.pos_x, entite.pos_y, entite.cap_cible
+                                )
+                                if 0.0 < d_l < 65.0 and abs(d_lat) < 2.5:
+                                    vehicule_devant_proche = True
+                                    break
+                    if vehicule_devant_proche:
+                        entite.etat_depassement = 1
+                        if est_axe_x:
+                            entite.voie_cible_y = voie_centrale
+                        else:
+                            entite.voie_cible_x = voie_centrale
+                    else:
+                        if est_axe_x:
+                            entite.voie_cible_y = voie_normale
+                        else:
+                            entite.voie_cible_x = voie_normale
+
+                elif etat_actuel == 1:
+                    # VERROUILLAGE HYSTÉRÉSIS STRICT TANT QUE LE CARREFOUR N'EST PAS FRANCHI
+                    if est_axe_x:
+                        entite.voie_cible_y = voie_centrale
+                    else:
+                        entite.voie_cible_x = voie_centrale
+
+                    franchi_carrefour = (long_apres_centre > 18.0)
+
+                    # Vérifie si un véhicule est sur sa voie d'origine dans [-12.0m, +30.0m]
+                    vehicule_sur_voie_origine = False
+                    for autre in copie_entites:
+                        if autre.id_entite == entite.id_entite or autre.type_entite == TypeVehicule.PIETON:
+                            continue
+                        if getattr(autre, 'est_axe_x', False) != est_axe_x:
+                            continue
+                        meme_sens = (
+                            math.cos(autre.cap) * math.cos(entite.cap)
+                            + math.sin(autre.cap) * math.sin(entite.cap)
+                        ) > 0.5
+                        if not meme_sens:
+                            continue
+                        pos_autre_lat = autre.pos_y if est_axe_x else autre.pos_x
+                        if abs(pos_autre_lat - voie_normale) < 2.0:
                             d_l, _ = self.projeter_point_repere_local(
-                                autre.pos_x, autre.pos_y, f_x, f_y, entite.cap_cible
+                                autre.pos_x, autre.pos_y, entite.pos_x, entite.pos_y, entite.cap_cible
                             )
-                            # Si un véhicule est à notre hauteur (-6m) ou devant nous jusqu'à 60m
-                            if -6.0 < d_l < 60.0:
-                                vehicule_en_cours_de_depassement = True
+                            if -12.0 <= d_l <= 30.0:
+                                vehicule_sur_voie_origine = True
                                 break
 
-                    # Dès que tous les véhicules sont doublés et que la voie normale est libre sur 15 m
-                    if not vehicule_en_cours_de_depassement:
+                    # Rabattement autorisé UNIQUEMENT si le carrefour est franchi ET voie d'origine libre
+                    if franchi_carrefour and not vehicule_sur_voie_origine:
                         entite.etat_depassement = 2
                         if est_axe_x:
-                            entite.voie_cible_y = 2.0 if math.cos(entite.cap_cible) > 0 else -2.0
+                            entite.voie_cible_y = voie_normale
                         else:
-                            entite.voie_cible_x = -2.0 if math.sin(entite.cap_cible) > 0 else 2.0
+                            entite.voie_cible_x = voie_normale
 
-                # Phase 2 -> 0 : Réintégration terminée
-                elif getattr(entite, 'etat_depassement', 0) == 2:
-                    delta_pos = (
-                        abs(entite.pos_y - entite.voie_cible_y)
-                        if est_axe_x
-                        else abs(entite.pos_x - entite.voie_cible_x)
-                    )
-                    if delta_pos < 0.25:
+                elif etat_actuel == 2:
+                    if est_axe_x:
+                        entite.voie_cible_y = voie_normale
+                        delta_pos = abs(entite.pos_y - voie_normale)
+                    else:
+                        entite.voie_cible_x = voie_normale
+                        delta_pos = abs(entite.pos_x - voie_normale)
+
+                    if delta_pos < 0.08:
+                        if est_axe_x:
+                            entite.pos_y = voie_normale
+                        else:
+                            entite.pos_x = voie_normale
                         entite.etat_depassement = 0
 
             # -------------------------------------------------------------
@@ -762,6 +927,12 @@ class MoteurSimulation(QThread):
             elif entite.type_entite == TypeVehicule.VIG_VTA:
                 vitesse_consigne = 20.0
 
+            # Évacuation carrefour devant VTA
+            if vta_proche and entite.type_entite != TypeVehicule.VIG_VTA and dans_carrefour_proche:
+                vitesse_consigne = 14.0
+
+            pos_lat_actuelle = entite.pos_y if est_axe_x else entite.pos_x
+
             if distance_arret < 60.0:
                 marge_securite = (
                     2.0 + entite.vitesse * 1.0
@@ -774,50 +945,63 @@ class MoteurSimulation(QThread):
                     v_securite = math.sqrt(2.0 * 2.0 * dist_utile)
 
                 vitesse_cible = min(vitesse_consigne, v_securite)
-
-                # Règle 3.2 : Tant qu'un véhicule non prioritaire n'a pas atteint son bas-côté (< 2.8 m),
-                # ne pas le forcer à vitesse = 0 : le laisser avancer à au moins 5.0 m/s pour dégager la voie
-                pos_lat_actuelle = entite.pos_y if est_axe_x else entite.pos_x
-                degagement_urgence = (
-                    entite.type_entite != TypeVehicule.VIG_VTA
-                    and (vta_sur_meme_axe or getattr(entite, 'forcer_arret', False))
-                    and abs(pos_lat_actuelle) < 2.8
-                    and obstacle_nature != "Pieton"
-                )
-                if degagement_urgence:
-                    vitesse_cible = max(vitesse_cible, 5.0)
-
-                erreur_vitesse = vitesse_cible - entite.vitesse
-
-                if erreur_vitesse > 0.10:
-                    entite.commande_acceleration = min(2.5, erreur_vitesse * 1.0)
-                    entite.freinage_mecanique = False
-                elif erreur_vitesse < -0.10:
-                    acc_requise = erreur_vitesse * 2.0
-                    if acc_requise > -1.5:
-                        entite.commande_acceleration = acc_requise
-                        entite.freinage_mecanique = False
-                    else:
-                        mu = self.environnement.calculer_coefficient_friction()
-                        facteur_abs = 1.0 if getattr(entite, 'possede_abs', True) else 0.75
-                        decel_max = -9.81 * mu * facteur_abs * (1.0 - 0.25 * getattr(entite, 'usure_pneus', 0.0))
-                        entite.commande_acceleration = max(acc_requise, decel_max)
-                        entite.freinage_mecanique = True
-                else:
-                    entite.commande_acceleration = 0.0
-                    entite.freinage_mecanique = False
-
-                if distance_arret <= 1.0 or (distance_arret <= 3.5 and obstacle_nature == "Pieton"):
-                    if not degagement_urgence:
-                        entite.commande_acceleration = -10.0
-                        entite.freinage_mecanique = True
-                        entite.vitesse = 0.0
             else:
+                vitesse_cible = vitesse_consigne
+
+            # Priorité absolue de dégagement du carrefour (virage Bézier ou carrefour)
+            if est_engage_intersection and (obstacle_nature != "Pieton" or distance_arret >= 2.5):
+                vitesse_cible = max(vitesse_cible, 6.0)
+
+            # Évacuation immédiate carrefour si VTA approche
+            if vta_proche and entite.type_entite != TypeVehicule.VIG_VTA and dans_carrefour_proche:
+                vitesse_cible = max(vitesse_cible, 14.0)
+
+            # Dégagement latéral vers bas-côté pour véhicules non prioritaires
+            if entite.type_entite != TypeVehicule.VIG_VTA and (vta_sur_meme_axe or vta_proche or getattr(entite, 'forcer_arret', False)):
+                if not dans_carrefour_proche:
+                    if abs(pos_lat_actuelle) < 3.0 and obstacle_nature != "Pieton":
+                        # En cours de rangement latéral : maintenir au moins 5.0 m/s
+                        vitesse_cible = max(vitesse_cible, 5.0)
+                    elif abs(pos_lat_actuelle) >= 3.0 and dist_ligne > 2.0:
+                        # Rangé sur le bas-côté : arrêt
+                        vitesse_cible = 0.0
+
+            # VTA en mission : maintien de la vitesse longitudinale à au moins 18.0 m/s
+            if entite.type_entite == TypeVehicule.VIG_VTA and (getattr(entite, 'etat_depassement', 0) == 1 or vta_proche):
+                if obstacle_nature != "Pieton" or distance_arret >= 2.5:
+                    vitesse_cible = max(18.0, vitesse_consigne)
+
+            erreur_vitesse = vitesse_cible - entite.vitesse
+
+            if erreur_vitesse > 0.10:
+                entite.commande_acceleration = min(2.5, erreur_vitesse * 1.0)
                 entite.freinage_mecanique = False
-                if entite.vitesse < vitesse_consigne:
-                    entite.commande_acceleration = 2.5
+            elif erreur_vitesse < -0.10:
+                acc_requise = erreur_vitesse * 2.0
+                if acc_requise > -1.5:
+                    entite.commande_acceleration = acc_requise
+                    entite.freinage_mecanique = False
                 else:
-                    entite.commande_acceleration = 0.0
+                    mu = self.environnement.calculer_coefficient_friction()
+                    facteur_abs = 1.0 if getattr(entite, 'possede_abs', True) else 0.75
+                    decel_max = -9.81 * mu * facteur_abs * (1.0 - 0.25 * getattr(entite, 'usure_pneus', 0.0))
+                    entite.commande_acceleration = max(acc_requise, decel_max)
+                    entite.freinage_mecanique = True
+            else:
+                entite.commande_acceleration = 0.0
+                entite.freinage_mecanique = False
+
+            if distance_arret <= 1.0 or (distance_arret <= 3.5 and obstacle_nature == "Pieton"):
+                degagement_urgence = (
+                    (est_engage_intersection and obstacle_nature != "Pieton")
+                    or (vta_proche and entite.type_entite != TypeVehicule.VIG_VTA and dans_carrefour_proche)
+                    or (entite.type_entite == TypeVehicule.VIG_VTA and (getattr(entite, 'etat_depassement', 0) == 1 or vta_proche) and obstacle_nature != "Pieton")
+                    or (entite.type_entite != TypeVehicule.VIG_VTA and (vta_sur_meme_axe or vta_proche) and abs(pos_lat_actuelle) < 3.0 and obstacle_nature != "Pieton")
+                )
+                if not degagement_urgence:
+                    entite.commande_acceleration = -10.0
+                    entite.freinage_mecanique = True
+                    entite.vitesse = 0.0
 
             # Prise en compte prioritaire de la panne / arrêt simulé
             if getattr(entite, 'en_panne', False):
@@ -838,11 +1022,16 @@ class MoteurSimulation(QThread):
                 # La trajectoire et le cap sont directement régis par la courbe de Bézier quadratique
                 pass
             else:
-                erreur_cap = entite.cap_cible - entite.cap
-                while erreur_cap > math.pi:
-                    erreur_cap -= 2 * math.pi
-                while erreur_cap < -math.pi:
-                    erreur_cap += 2 * math.pi
+                if entite.type_entite == TypeVehicule.VIG_VTA:
+                    entite.est_axe_x = abs(math.cos(entite.cap_cible)) > 0.5
+                    entite.cap = entite.cap_cible
+                    erreur_cap = 0.0
+                else:
+                    erreur_cap = entite.cap_cible - entite.cap
+                    while erreur_cap > math.pi:
+                        erreur_cap -= 2 * math.pi
+                    while erreur_cap < -math.pi:
+                        erreur_cap += 2 * math.pi
 
                 if abs(erreur_cap) > 0.15:
                     # Phase de rotation géométrique active : aucun déport latéral arbitraire
@@ -859,27 +1048,39 @@ class MoteurSimulation(QThread):
                     else:
                         erreur_lat = entite.voie_cible_x - entite.pos_x
 
-                    est_manoeuvre_urgente = (
-                        (entite.type_entite == TypeVehicule.VIG_VTA and getattr(entite, 'etat_depassement', 0) != 0)
-                        or (entite.type_entite != TypeVehicule.VIG_VTA and (vta_sur_meme_axe or getattr(entite, 'forcer_arret', False)))
-                    )
-
-                    if est_manoeuvre_urgente:
-                        # Règle 3.1 : Déport latéral actif même si vitesse == 0 (vitesse latérale minimale 2.5 m/s)
-                        v_lat = max(2.5, abs(erreur_lat) * 3.0)
-                        step_lat = math.copysign(min(abs(erreur_lat), v_lat * dt), erreur_lat)
-                        if entite.est_axe_x:
-                            entite.pos_y += step_lat
+                    if entite.type_entite == TypeVehicule.VIG_VTA:
+                        # Vitesse transversale constante et fluide de 3.0 m/s sans dépassement
+                        v_lat = 3.0
+                        if abs(erreur_lat) < 0.08:
+                            if entite.est_axe_x:
+                                entite.pos_y = entite.voie_cible_y
+                            else:
+                                entite.pos_x = entite.voie_cible_x
                         else:
-                            entite.pos_x += step_lat
-                    else:
-                        if entite.vitesse > 0.1:
-                            facteur_v = min(1.0, entite.vitesse / 3.0)
-                            step_lat = erreur_lat * min(1.0, 2.0 * dt * facteur_v)
+                            step_lat = math.copysign(min(abs(erreur_lat), v_lat * dt), erreur_lat)
                             if entite.est_axe_x:
                                 entite.pos_y += step_lat
                             else:
                                 entite.pos_x += step_lat
+                    else:
+                        est_manoeuvre_urgente = (
+                            (vta_sur_meme_axe or vta_proche or getattr(entite, 'forcer_arret', False))
+                        )
+                        if est_manoeuvre_urgente:
+                            v_lat = max(2.5, abs(erreur_lat) * 3.0)
+                            step_lat = math.copysign(min(abs(erreur_lat), v_lat * dt), erreur_lat)
+                            if entite.est_axe_x:
+                                entite.pos_y += step_lat
+                            else:
+                                entite.pos_x += step_lat
+                        else:
+                            if entite.vitesse > 0.1:
+                                facteur_v = min(1.0, entite.vitesse / 3.0)
+                                step_lat = erreur_lat * min(1.0, 2.0 * dt * facteur_v)
+                                if entite.est_axe_x:
+                                    entite.pos_y += step_lat
+                                else:
+                                    entite.pos_x += step_lat
 
         # -------------------------------------------------------------
         # 6. INTÉGRATION CINÉMATIQUE D'EULER & BARRIÈRE ANTI-CLIPPING (RÈGLE 5)
@@ -926,12 +1127,18 @@ class MoteurSimulation(QThread):
                     else:
                         entite.voie_cible_x = -2.0 if math.sin(entite.cap_cible) > 0 else 2.0
                     entite.trajectoire_bezier = None
+                    entite.en_virage_bezier = False
                     entite.action_intersection = None
+                    entite.indicateur_virage = 0
             else:
                 entite.pos_x += entite.vitesse * math.cos(entite.cap) * dt
                 entite.pos_y += entite.vitesse * math.sin(entite.cap) * dt
 
             # Règle 5 : Barrière physique anti-clipping dur (< 1.2 m)
+            # Désactive totalement l'anti-clipping pour VIG_VTA dans son couloir d'urgence
+            if getattr(entite, 'type_entite', None) == TypeVehicule.VIG_VTA and (getattr(entite, 'etat_depassement', 0) in (1, 2) or vta_proche):
+                continue
+
             if getattr(entite, 'type_entite', None) != TypeVehicule.PIETON and entite.vitesse > 0.0:
                 demi_l = entite.longueur_m / 2.0
                 front_x = entite.pos_x + demi_l * math.cos(entite.cap)
@@ -953,20 +1160,24 @@ class MoteurSimulation(QThread):
                         proj_lat = -dx * math.sin(entite.cap) + dy * math.cos(entite.cap)
                         if entite.type_entite == TypeVehicule.VIG_VTA:
                             largeur_totale = 1.0  # Max 1.0 m pour le VTA dans le couloir central
+                        elif autre.type_entite == TypeVehicule.CYCLISTE and entite.type_entite != TypeVehicule.CYCLISTE:
+                            largeur_totale = 1.1  # Piste cyclable séparée de 1.6m : aucun blocage par les cyclistes
                         else:
                             largeur_totale = (entite.largeur_m / 2.0) + (getattr(autre, 'largeur_m', 1.8) / 2.0) + 0.2
 
-                        # Obstacle situé immédiatement devant le pare-chocs
-                        if proj_front > -0.2 and abs(proj_lat) < largeur_totale:
-                            if math.hypot(dx, dy) < 1.2:
+                        # Obstacle situé immédiatement devant le pare-chocs (< 1.2 m) ou en pénétration frontale
+                        if -entite.longueur_m < proj_front < 1.2 and abs(proj_lat) < largeur_totale:
+                            if proj_front <= 0.0 or math.hypot(dx, dy) < 1.2:
                                 clipping_detecte = True
                                 break
 
                     if clipping_detecte:
-                        # Annulation immédiate du déplacement du pas de temps courant
+                        # Annulation UNIQUEMENT du déplacement longitudinal (fin du rollback latéral)
                         entite.vitesse = 0.0
-                        entite.pos_x = pos_x_prev
-                        entite.pos_y = pos_y_prev
+                        if entite.est_axe_x:
+                            entite.pos_x = pos_x_prev
+                        else:
+                            entite.pos_y = pos_y_prev
                         break
 
         # 7. Transmission des métriques réseau (1 Hz)
@@ -999,6 +1210,10 @@ class MoteurSimulation(QThread):
                 snap.age_pneus = getattr(e, 'age_pneus', 0.0)
                 snap.usure_pneus = getattr(e, 'usure_pneus', 0.0)
                 snap.action_intersection = getattr(e, 'action_intersection', None)
+                snap.cap_cible = getattr(e, 'cap_cible', snap.cap)
+                snap.indicateur_virage = getattr(e, 'indicateur_virage', 0)
+                snap.en_virage_bezier = getattr(e, 'en_virage_bezier', False)
+                snap.en_panne = getattr(e, 'en_panne', False)
                 snap.etat_depassement = getattr(e, 'etat_depassement', 0)
                 snap.obstacle_nature = getattr(e, 'obstacle_nature', 'Aucun')
                 snap.distance_obstacle = getattr(e, 'distance_arret', 999.0)
