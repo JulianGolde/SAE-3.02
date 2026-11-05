@@ -1,0 +1,6 @@
+{
+    "server_ip": "127.0.0.1",
+    "server_tcp_port": 5000,
+    "server_udp_port": 5001,
+    "client_udp_port": 5002
+}
