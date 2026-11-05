@@ -523,10 +523,16 @@ class DashboardPanel(QWidget):
         row_scen.addWidget(self.combo_scenario, stretch=2)
         row_scen.addWidget(self.btn_load_scenario, stretch=1)
 
+        self.btn_import_scenario = QPushButton("📂 Importer un scénario JSON")
+        self.btn_import_scenario.setStyleSheet(
+            "background-color: #0284C7; color: white; padding: 5px; font-weight: bold;"
+        )
+
         sim_layout.addWidget(self.btn_toggle_sim)
         sim_layout.addLayout(row_vitesse)
         sim_layout.addLayout(row_meteo)
         sim_layout.addLayout(row_scen)
+        sim_layout.addWidget(self.btn_import_scenario)
         lay_tab1.addWidget(grp_sim)
 
         # Insertion d'usagers
@@ -993,12 +999,24 @@ class DashboardPanel(QWidget):
         """Enregistre l'apparition d'un véhicule prioritaire VTA."""
         self._enregistrer_evt("ALERTE_VTA", "Demande de priorité véhicule d'urgence (VTA)")
 
-    def _reinitialiser_session_scenario(self):
-        """Réinitialise la session de simulation et les courbes lors d'un changement de scénario."""
+    def _reinitialiser_session_scenario(self, scenario_nom_override: str | None = None):
+        """Réinitialise la session de simulation et les courbes lors d'un changement de scénario.
+
+        Args:
+            scenario_nom_override (str | None, optional): Nom personnalisé du scénario à enregistrer
+                dans la base de données. Si None ou booléen (signal Qt), utilise le nom sélectionné
+                dans le sélecteur. Par défaut None.
+
+        Returns:
+            None
+        """
         try:
-            scenario_nom = self.combo_scenario.currentText()
-            if scenario_nom.startswith("--"):
-                scenario_nom = "Standard"
+            if isinstance(scenario_nom_override, str) and scenario_nom_override:
+                scenario_nom = scenario_nom_override
+            else:
+                scenario_nom = self.combo_scenario.currentText()
+                if scenario_nom.startswith("--"):
+                    scenario_nom = "Standard"
 
             self.simulation_id = self.db.creer_simulation(scenario_nom)
             self.temps_debut_sim = time.time()

@@ -1,9 +1,23 @@
-"""Point d'entrée principal du client de simulation et interface graphique (IHM).
+"""Module principal du client de simulation et interface Cyber-SCADA — Projet Esk-2718.
 
-Ce module initialise l'application Qt, orchestre la scène 2D du carrefour (`CarrefourScene`),
-la vue adaptée haute performance (`CarrefourView`), le tableau de bord de commande (`DashboardPanel`),
-le fil de calcul cinématique (`MoteurSimulation`) ainsi que le nœud réseau V2X (`ClientNode`).
-Il assure également l'auto-scale intégral, le zoom interactif, le HUD télémétrique et l'analyse CLI.
+Rôle architectural :
+    Point d'entrée du poste de contrôle opérateur et du simulateur cinématique.
+    Ce module orchestre la scène 2D du carrefour (`CarrefourScene`), la vue à
+    hautes performances (`CarrefourView`), le tableau de bord de commande (`DashboardPanel`),
+    le fil de calcul cinématique temps réel (`MoteurSimulation`) ainsi que le nœud
+    de communication réseau V2X / V2I (`ClientNode`).
+
+Conformité Thread-Safety :
+    Conforme à la Règle d'or Qt : aucun composant de l'interface graphique (IHM) n'est
+    directement accédé ou modifié par des threads d'arrière-plan. Tous les flux de données
+    en provenance de la physique (`MoteurSimulation`) et du réseau (`ClientNode`) transitent
+    exclusivement via le bus événementiel Qt sous forme de signaux `pyqtSignal` connectés
+    à des slots exécutés sur le thread principal de rendu IHM.
+
+Conformité V2X / V2I :
+    Interfacé avec le régulateur SCADA distant via des sockets POSIX pures (TCP/UDP).
+    Assure l'émission instantanée des datagrammes prioritaires VTA en UDP (port 5001)
+    et la synchronisation des cycles tricolores et métriques en TCP (port 5000).
 """
 
 import json
@@ -13,7 +27,6 @@ import os
 import socket
 import sys
 import time
-import traceback
 import uuid
 
 # Assurer la résolution des imports internes quel que soit le répertoire d'appel
@@ -34,6 +47,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileDialog,
+    QGraphicsView,
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
@@ -166,7 +181,7 @@ def load_configuration(cli_args: dict | None = None) -> dict:
         os.path.join(os.getcwd(), "config.json"),
         "config.json"
     ]
-
+    
     config = {
         "server_ip": "127.0.0.1",
         "server_tcp_port": 5000,
@@ -219,11 +234,16 @@ class MainWindow(QMainWindow):
     """
 
     def __init__(self, config: dict | None = None):
-        """Initialise la fenêtre principale, l'interface graphique et le moteur de calcul."""
+        """Initialise la fenêtre principale, l'interface graphique et le moteur de calcul.
+
+        Args:
+            config (dict | None, optional): Dictionnaire de configuration réseau et IHM.
+                Par défaut None.
+        """
         super().__init__()
         self.config = config if config is not None else {}
         self.setWindowTitle("Esk-2718 — Simulation Totale VPI/VPO")
-        self.setMinimumSize(1280, 800)
+        self.setMinimumSize(1280, 800) # dimension minimale pour la practicité
 
         self.id_selectionne = None
         self.type_a_placer = None
@@ -391,6 +411,8 @@ class MainWindow(QMainWindow):
         self.dashboard.btn_dir_ouest.clicked.connect(lambda: self.prevoir_virage(math.pi))
 
         self.dashboard.btn_load_scenario.clicked.connect(self.charger_scenario)
+        if hasattr(self.dashboard, 'btn_import_scenario'):
+            self.dashboard.btn_import_scenario.clicked.connect(self.importer_scenario)
 
         if hasattr(self.dashboard, 'btn_feux_ns'):
             self.dashboard.btn_feux_ns.clicked.connect(self.moteur.intersection.forcer_vert_ns)
@@ -400,7 +422,12 @@ class MainWindow(QMainWindow):
             self.dashboard.btn_feux_auto.clicked.connect(self.moteur.intersection.reprendre_mode_automatique)
 
         # Lancement différé automatique après initialisation complète de la boucle d'événements Qt
-        QTimer.singleShot(100, self._startup_routine)
+        self._startup_timer = None
+        if self.config.get("auto_startup", True):
+            self._startup_timer = QTimer(self)
+            self._startup_timer.setSingleShot(True)
+            self._startup_timer.timeout.connect(self._startup_routine)
+            self._startup_timer.start(100)
 
     def toggle_preemption_v2i(self):
         """Bascule l'état de la préemption V2I lors d'un clic direct sur l'antenne RSU."""
@@ -410,13 +437,21 @@ class MainWindow(QMainWindow):
             self.scene.set_preemption_v2i_active(nouvel_etat)
 
     def resizeEvent(self, event):
-        """Garantit l'auto-fit de la vue lors de tout redimensionnement de la fenêtre."""
+        """Garantit l'auto-fit de la vue lors de tout redimensionnement de la fenêtre.
+
+        Args:
+            event (QResizeEvent): Événement de redimensionnement de la fenêtre.
+        """
         super().resizeEvent(event)
         if hasattr(self, 'view'):
             self.view.fit_scene()
 
     def showEvent(self, event):
-        """Garantit l'auto-fit initial dès l'affichage de la fenêtre."""
+        """Garantit l'auto-fit initial dès l'affichage de la fenêtre.
+
+        Args:
+            event (QShowEvent): Événement d'affichage initial de la fenêtre.
+        """
         super().showEvent(event)
         if hasattr(self, 'view'):
             QTimer.singleShot(0, self.view.fit_scene)
@@ -563,12 +598,17 @@ class MainWindow(QMainWindow):
         Args:
             x (float): Coordonnée cartésienne X du clic en mètres.
             y (float): Coordonnée cartésienne Y du clic en mètres.
+
+        Returns:
+            None
         """
         if self.type_a_placer is None:
             return
         try:
             nouvelle = Vehicule(id_vehicule=str(uuid.uuid4())[:8], v_type=self.type_a_placer)
-            voie = self.dashboard.combo_voie_spawn.currentText()
+            voie = ""
+            if hasattr(self, 'dashboard') and hasattr(self.dashboard, 'combo_voie_spawn'):
+                voie = self.dashboard.combo_voie_spawn.currentText()
 
             # Positionnement et orientation cinématique selon le profil de la voie
             if voie == "Passage Piéton" or self.type_a_placer == TypeVehicule.PIETON:
@@ -612,6 +652,12 @@ class MainWindow(QMainWindow):
                 nouvelle.en_virage_bezier = False
             nouvelle.vitesse = 0.0
             self.moteur.ajouter_entite(nouvelle)
+
+            # Visibilité immédiate même en mode pause : rafraîchissement direct de l'affichage
+            if hasattr(self.moteur, "emettre_snapshot_immediat"):
+                snaps, inter = self.moteur.emettre_snapshot_immediat()
+                if hasattr(self, "rafraichir_interface"):
+                    self.rafraichir_interface(snaps, inter)
 
             # Désélectionne l'outil de placement sauf si la touche Majuscule (Shift) est maintenue
             modifiers = QApplication.keyboardModifiers()
@@ -672,18 +718,144 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"[MainWindow] Erreur lors du chargement du scénario : {e}", exc_info=True)
 
+    def importer_scenario(self, chemin_fichier: str | os.PathLike | None = None) -> bool:
+        """Importe un scénario au format JSON et l'injecte dans la simulation.
+
+        Ouvre une boîte de dialogue graphique pour sélectionner un fichier JSON de scénario
+        (ou utilise le chemin fourni), valide la conformité du schéma (liste de dictionnaires,
+        catégories d'usagers valides, coordonnées numériques), réinitialise la liste
+        des entités de manière thread-safe et instancie les nouveaux véhicules.
+
+        Args:
+            chemin_fichier (str | os.PathLike | None, optional): Chemin absolu ou relatif vers le fichier
+                JSON à importer. Si None ou non spécifié, ouvre un sélecteur QFileDialog.
+                Par défaut None.
+
+        Returns:
+            bool: True si le scénario a été importé avec succès, False en cas d'annulation ou d'erreur.
+        """
+        fichier = str(chemin_fichier) if isinstance(chemin_fichier, (str, os.PathLike)) and str(chemin_fichier) else None
+
+        if not fichier:
+            fichier, _ = QFileDialog.getOpenFileName(
+                self,
+                "Importer un scénario JSON",
+                "",
+                "Fichiers JSON (*.json)"
+            )
+
+        if not fichier:
+            return False
+
+        try:
+            with open(fichier, "r", encoding="utf-8") as f:
+                donnees = json.load(f)
+
+            if not isinstance(donnees, list):
+                raise ValueError("Le scénario doit contenir une liste d'entités.")
+
+            nouvelles_entites = []
+
+            for item in donnees:
+                if not isinstance(item, dict):
+                    raise ValueError("Une entité du scénario est invalide.")
+
+                raw_type = item.get("type", "VOITURE")
+                if isinstance(raw_type, str):
+                    norm_type = raw_type.strip().upper().replace("É", "E")
+                else:
+                    norm_type = raw_type
+
+                if norm_type not in TypeVehicule.__members__:
+                    raise ValueError(f"Type de véhicule inconnu : {raw_type}")
+
+                raw_id = item.get("id")
+                id_str = str(raw_id) if raw_id is not None and str(raw_id).strip() else str(uuid.uuid4())[:8]
+
+                v = Vehicule(
+                    id_vehicule=id_str,
+                    v_type=TypeVehicule[norm_type]
+                )
+
+                v.pos_x = float(item.get("pos_x", 0.0))
+                v.pos_y = float(item.get("pos_y", 0.0))
+                v.cap = float(item.get("cap", 0.0))
+                v.vitesse = float(item.get("vitesse", 0.0))
+                if item.get("action_intersection") is not None:
+                    v.action_intersection = float(item["action_intersection"])
+
+                nouvelles_entites.append(v)
+
+            if hasattr(self.moteur, "vider_entites"):
+                self.moteur.vider_entites()
+            elif hasattr(self.moteur, "mutex") and self.moteur.mutex is not None:
+                with QMutexLocker(self.moteur.mutex):
+                    self.moteur.entites.clear()
+            else:
+                self.moteur.entites.clear()
+
+            for entite in nouvelles_entites:
+                self.moteur.ajouter_entite(entite)
+
+            self.id_selectionne = None
+            if hasattr(self.dashboard, "text_hud"):
+                self.dashboard.text_hud.setText("Cliquez sur un usager...")
+
+            nom_base = os.path.splitext(os.path.basename(fichier))[0]
+            if hasattr(self.dashboard, "_reinitialiser_session_scenario"):
+                self.dashboard._reinitialiser_session_scenario(f"Import: {nom_base}")
+            elif hasattr(self.dashboard, "reset_inspection"):
+                self.dashboard.reset_inspection()
+
+            if hasattr(self.moteur, "emettre_snapshot_immediat"):
+                snaps, inter = self.moteur.emettre_snapshot_immediat()
+                if hasattr(self, "rafraichir_interface"):
+                    self.rafraichir_interface(snaps, inter)
+
+            if hasattr(self, "view") and hasattr(self.view, "fit_scene"):
+                self.view.fit_scene()
+
+            QMessageBox.information(
+                self,
+                "Import réussi",
+                f"{len(nouvelles_entites)} entité(s) importée(s)."
+            )
+            return True
+
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.error(f"[MainWindow] Erreur d'importation du scénario : {e}", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Erreur d'importation",
+                f"Impossible d'importer le scénario :\n{e}"
+            )
+            return False
+
     def set_type_a_placer(self, t: TypeVehicule | None):
         """Active ou désactive l'outil d'insertion pour une catégorie d'usager donnée.
 
         Args:
             t (TypeVehicule | None): Catégorie d'usager à placer, ou None pour repasser en mode sélection.
+
+        Returns:
+            None
         """
         try:
             self.type_a_placer = t
             if t is not None:
                 self.dashboard.lbl_mode_placement.setText(f"Prêt à placer : {t.name}")
+                if hasattr(self, 'view') and self.view is not None:
+                    self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+                    self.view.setCursor(Qt.CursorShape.CrossCursor)
+                    if hasattr(self.view, 'viewport') and self.view.viewport() is not None:
+                        self.view.viewport().setCursor(Qt.CursorShape.CrossCursor)
             else:
                 self.dashboard.lbl_mode_placement.setText("Mode : Sélection")
+                if hasattr(self, 'view') and self.view is not None:
+                    self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+                    self.view.unsetCursor()
+                    if hasattr(self.view, 'viewport') and self.view.viewport() is not None:
+                        self.view.viewport().unsetCursor()
 
             if t is None:
                 self.scene.supprimer_hologramme()
@@ -731,6 +903,8 @@ class MainWindow(QMainWindow):
             event (QCloseEvent): Événement de fermeture Qt.
         """
         try:
+            if hasattr(self, '_startup_timer') and self._startup_timer is not None:
+                self._startup_timer.stop()
             if hasattr(self, 'moteur') and self.moteur.isRunning():
                 self.moteur.arreter()
             if hasattr(self, 'client_node') and self.client_node is not None:
@@ -744,8 +918,23 @@ class MainWindow(QMainWindow):
 
 
 def global_exception_hook(exctype, value, tb):
-    """Gestionnaire global des exceptions non interceptées (sys.excepthook)."""
-    error_msg = "".join(traceback.format_exception(exctype, value, tb))
+    """Gestionnaire global des exceptions non interceptées (sys.excepthook).
+
+    Args:
+        exctype (type): Type de l'exception non interceptée.
+        value (BaseException): Instance de l'exception levée.
+        tb (object): Objet traceback associé à l'exception.
+    """
+    tb_lignes = ["Traceback (most recent call last):\n"]
+    courant = tb
+    while courant is not None:
+        cadre = courant.tb_frame
+        tb_lignes.append(
+            f'  Fichier "{cadre.f_code.co_filename}", ligne {courant.tb_lineno}, dans {cadre.f_code.co_name}\n'
+        )
+        courant = courant.tb_next
+    tb_lignes.append(f"{exctype.__name__}: {value}\n")
+    error_msg = "".join(tb_lignes)
     logger.critical(f"Arrêt d'urgence du système - Crash non intercepté : {error_msg}")
 
     try:
