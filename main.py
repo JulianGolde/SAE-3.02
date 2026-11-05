@@ -1,15 +1,16 @@
-"""Point d'entrée principal racine du simulateur Esk-2718.
+"""Point d'entrée secondaire du simulateur Esk-2718.
 
-Ce script redirige l'exécution vers src/client_main.py avec propagation
-des arguments en ligne de commande.
+Ce module constitue un lanceur léger redirigeant l'exécution vers
+`client_main.py` afin de respecter les critères de modularité et
+d'éviter toute duplication de code au sein du dépôt.
 """
 
 import os
 import sys
 
-repertoire_src = os.path.abspath(os.path.join(os.path.dirname(__file__), "src"))
-if repertoire_src not in sys.path:
-    sys.path.insert(0, repertoire_src)
+repertoire_courant = os.path.abspath(os.path.dirname(__file__))
+if repertoire_courant not in sys.path:
+    sys.path.insert(0, repertoire_courant)
 
 from client_main import main
 
