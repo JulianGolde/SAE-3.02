@@ -1,8 +1,22 @@
-"""Module de communication réseau côté serveur pour la simulation de carrefour.
+"""Module de communication réseau côté serveur et régulateur SCADA V2X / V2I — Projet Esk-2718.
 
-Ce module implémente le nœud serveur (ServerNode) qui multiplexe les connexions
-TCP des clients pour la synchronisation d'état et la collecte de métriques, tout en
-écoutant les alertes de véhicules prioritaires (VTA) via UDP.
+Rôle architectural :
+    Nœud serveur réseau central (`ServerNode`) exécuté dans son propre fil `threading.Thread`.
+    Multiplexe les connexions TCP des postes de contrôle SCADA pour la synchronisation
+    d'état des feux tricolores et la collecte des métriques, tout en écoutant les datagrammes
+    d'alerte d'urgence émis par les véhicules prioritaires (VTA) via le canal UDP.
+
+Conformité Thread-Safety :
+    Multi-threading robuste géré via `threading.Thread` et `threading.Lock`.
+    La liste des clients TCP actifs, les tampons de réception et les accès à l'instance
+    locale de base SQLite (`DBManager`) sont rigoureusement protégés contre les accès concurrents.
+    La boucle de multiplexage non-bloquante `select.select()` garantit une réactivité constante
+    sans blocage de ressource.
+
+Conformité V2X / V2I :
+    Implémente le cœur de l'infrastructure V2I :
+    - Écoute sur socket UDP (port 5001) des alertes VTA prioritaire (`vta_alert`, `vta_end`) avec commutation immédiate des feux.
+    - Diffusion en boucle continue aux clients TCP (port 5000) de l'état d'intersection cadré par `\n` et encapsulé avec magic `b'ESK2'`.
 """
 
 import socket
@@ -10,7 +24,6 @@ import select
 import struct
 import json
 import threading
-import queue
 import logging
 import time
 import os
@@ -39,12 +52,26 @@ CODE_TO_FRAME_TYPE = {v: k for k, v in FRAME_TYPE_TO_CODE.items()}
 
 
 def code_pour_type_trame(frame_type: str) -> int:
-    """Retourne le code numérique 1 octet associé à un type de trame."""
+    """Retourne le code numérique 1 octet associé à un type de trame.
+
+    Args:
+        frame_type (str): Nom textuel du type de trame (ex: 'vta_alert', 'state').
+
+    Returns:
+        int: Code numérique uint8 (1 à 8, ou 0 si inconnu).
+    """
     return FRAME_TYPE_TO_CODE.get(str(frame_type).lower(), 0)
 
 
 def type_trame_pour_code(code: int) -> str:
-    """Retourne le libellé textuel associé à un code type de trame binaire."""
+    """Retourne le libellé textuel associé à un code type de trame binaire.
+
+    Args:
+        code (int): Code numérique uint8 de la trame.
+
+    Returns:
+        str: Libellé textuel correspondant, ou 'inconnu'.
+    """
     return CODE_TO_FRAME_TYPE.get(code, "inconnu")
 
 
@@ -65,6 +92,9 @@ def packager_entete_binaire(frame_type_code: int, seq: int, payload_bytes: bytes
     Returns:
         bytes: En-tête binaire de 13 octets.
     """
+    # ENCAPSULATION BINAIRE STANDARDISÉE :
+    # struct.pack avec '!4sBII' applique l'ordre réseau big-endian (RFC 1700),
+    # fournissant un en-tête compact de 13 octets avec un magic number 'ESK2' de validation.
     return struct.pack("!4sBII", b"ESK2", int(frame_type_code), int(seq), len(payload_bytes))
 
 
@@ -293,7 +323,9 @@ class ServerNode(threading.Thread):
                     with self._clients_lock:
                         sockets_to_watch = [self.tcp_sock, self.udp_sock] + list(self.clients)
 
-                    # 4. Surveillance non bloquante via select (timeout court de 50ms)
+                    # MULTIPLEXAGE SYNCHRONE NON-BLOQUANT VIA SELECT :
+                    # select.select() surveille simultanément tous les descripteurs de sockets (TCP, UDP
+                    # et sockets clients connectées) avec un timeout de 50 ms, évitant l'attente active.
                     try:
                         readable, _, exceptional = select.select(sockets_to_watch, [], sockets_to_watch, 0.05)
                     except (OSError, ValueError, select.error) as select_err:
@@ -580,7 +612,9 @@ class ServerNode(threading.Thread):
                     self._remove_client(client_sock, reason="dépassement buffer")
                     return
 
-            # Extraction des trames complètes délimitées par b'\n'
+            # CADRAGE APPLICATIF TCP PAR DÉLIMITEUR '\n' :
+            # Extraction des trames JSON atomiques délimitées par b'\n' au sein du flux continu TCP.
+            # Préserve l'intégrité face à la fragmentation IP ou au regroupement par l'algorithme de Nagle.
             while True:
                 with self._clients_lock:
                     buf = self.client_buffers.get(client_sock)

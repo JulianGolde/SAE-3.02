@@ -1,9 +1,22 @@
-"""Module de visualisation graphique temps réel pour Esk-2718.
+"""Module de visualisation graphique temps réel et télémétrie SCADA — Projet Esk-2718.
 
-Fournit des widgets pyqtgraph interactifs pour afficher l'évolution temporelle
-de la vitesse moyenne et du nombre de véhicules circulant sur le carrefour.
-Conforme aux exigences de la SAÉ 3.02 : librairies autorisées (PyQt6, pyqtgraph),
-labels en français, rolling window de 120 points et thème Cyber-SCADA sombre.
+Rôle architectural :
+    Composant de rendu des séries temporelles statistiques sous forme de courbes dynamiques.
+    Fournit des widgets `pyqtgraph` interactifs intégrés à l'IHM pour suivre l'évolution
+    de la vitesse moyenne (km/h) et de la densité du trafic (nombre de véhicules).
+    Conforme aux exigences officielles de la SAÉ 3.02 : usage strict des bibliothèques
+    autorisées (`PyQt6`, `pyqtgraph`), fenêtrage glissant de 120 points et thème Cyber-SCADA sombre.
+
+Conformité Thread-Safety :
+    Conforme à la Règle d'or Qt : les widgets `pyqtgraph` et leurs courbes vectorielles
+    sont instanciés et rafraîchis exclusivement sur le fil principal de l'IHM.
+    Les métriques issues de la physique ou de la réception réseau transitent par signaux
+    `pyqtSignal` avant tout ajout de point sur les tracés.
+
+Conformité V2X / V2I :
+    Visualise en temps réel l'impact de la préemption prioritaire V2I :
+    permet d'observer les augmentations de fluidité et les gains de temps lors du
+    passage d'un convoi prioritaire VTA à travers le carrefour régulé.
 """
 
 import logging
@@ -175,7 +188,11 @@ class FenetreGraphiques(QDialog):
     """Boîte de dialogue affichant les graphiques temps réel complets et détaillés."""
 
     def __init__(self, parent: QWidget | None = None):
-        """Initialise la boîte de dialogue avec le widget graphique dédié."""
+        """Initialise la boîte de dialogue avec le widget graphique dédié.
+
+        Args:
+            parent (QWidget | None, optional): Widget parent Qt. Par défaut None.
+        """
         super().__init__(parent)
         self.setWindowTitle("📊 Analyse Graphique Temps Réel — Esk-2718")
         self.setMinimumSize(780, 520)
@@ -215,9 +232,19 @@ class FenetreGraphiques(QDialog):
         layout.addLayout(btn_layout)
 
     def ajouter_point(self, timestamp, vitesse_moy: float, nb_vehicules: int):
-        """Délègue l'ajout de point au widget graphique interne."""
+        """Délègue l'ajout de point au widget graphique interne.
+
+        Args:
+            timestamp (float | str): Horodatage ou valeur temporelle du point.
+            vitesse_moy (float): Vitesse moyenne instantanée en km/h.
+            nb_vehicules (int): Nombre total de véhicules présents.
+        """
         self.graphique.ajouter_point(timestamp, vitesse_moy, nb_vehicules)
 
     def charger_metriques(self, metriques: list):
-        """Charge une série complète de métriques dans le widget interne."""
+        """Charge une série complète de métriques dans le widget interne.
+
+        Args:
+            metriques (list): Liste de tuples ou dictionnaires (timestamp, avg_speed, vehicle_count).
+        """
         self.graphique.charger_metriques(metriques)

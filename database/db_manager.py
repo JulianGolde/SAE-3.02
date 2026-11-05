@@ -1,8 +1,21 @@
-"""Module de gestion de la persistance SQLite pour la simulation de carrefour Esk-2718.
+"""Module de persistance relationnelle SQLite3 et historisation des données — Projet Esk-2718.
 
-Fournit une interface thread-safe pour enregistrer et consulter les simulations,
-les séries temporelles de métriques, les événements discrets et l'historique des feux.
-Conforme aux exigences SAÉ 3.02 (Esk-2718) et aux normes d'architecture client-serveur.
+Rôle architectural :
+    Gestionnaire centralisé de persistance relationnelle (`DBManager`) pour Esk-2718.
+    Assure le stockage ACID local et l'interrogation des simulations, séries temporelles
+    de trafic, journaux d'événements discrets et historiques des cycles de feux tricolores.
+
+Conformité Thread-Safety :
+    Conçu pour un environnement multi-threadé sans conflit :
+    Toutes les transactions et requêtes SQL sont sérialisées sous verrouillage strict
+    d'exclusion mutuelle (`threading.Lock`), prévenant tout verrouillage inter-threads
+    ou corruption de base SQLite partagée entre les threads réseau et applicatif.
+
+Conformité V2X / V2I :
+    Stocke et horodate fidèlement les événements critiques V2I/V2X :
+    - Détections et alertes d'intervention prioritaire VTA.
+    - Transitions de phases et synchronisation des feux tricolores.
+    - Séries temporelles de vitesses et débits pour les graphiques SCADA en temps réel.
 """
 
 import csv
@@ -34,7 +47,14 @@ class LigneResultat(dict):
         self._valeurs = list(valeurs)
 
     def __getitem__(self, item):
-        """Permet l'accès direct par index positionnel, tranche (slice) ou nom de colonne."""
+        """Permet l'accès direct par index positionnel, tranche (slice) ou nom de colonne.
+
+        Args:
+            item (int | slice | str): Nom de colonne ou indice positionnel dans le tuple SQLite.
+
+        Returns:
+            Any: Valeur correspondante de la colonne ou sous-tuple de valeurs.
+        """
         if isinstance(item, (int, slice)):
             return self._valeurs[item]
         return super().__getitem__(item)
@@ -154,12 +174,20 @@ class DBManager:
 
     @property
     def simulation_courante_id(self) -> int | None:
-        """Retourne l'identifiant unique de la simulation actuellement active."""
+        """Retourne l'identifiant unique de la simulation actuellement active.
+
+        Returns:
+            int | None: Identifiant primaire de la session de simulation active.
+        """
         return self._simulation_courante_id
 
     @simulation_courante_id.setter
     def simulation_courante_id(self, sim_id: int | None):
-        """Définit l'identifiant unique de la simulation active."""
+        """Définit l'identifiant unique de la simulation active.
+
+        Args:
+            sim_id (int | None): Identifiant entier de la simulation.
+        """
         self._simulation_courante_id = int(sim_id) if sim_id is not None else None
 
     def creer_simulation(self, scenario: str = "Standard") -> int:

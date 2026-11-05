@@ -1,11 +1,24 @@
-"""Moteur physique et cinématique de simulation du carrefour intelligent.
+"""Moteur physique et cinématique de simulation du carrefour intelligent Esk-2718.
 
-Ce module constitue le cœur de calcul de la simulation dynamique Esk-2718.
-Il implémente les lois de la cinématique et de la dynamique du véhicule,
-l'évitement d'obstacles multi-points (boîtes englobantes 2D), la régulation
-adaptative de vitesse (ACC), la gestion du couloir central pour les véhicules
-d'urgence (VTA), les virages géométriques par arc sans dérapage en crabe,
-ainsi que les barrières physiques anti-superposition (Yellow Box & anti-clipping).
+Rôle architectural :
+    Cœur de calcul cinématique et dynamique de la simulation Esk-2718.
+    Il implémente :
+    - Les équations cinématiques différentielles d'Euler : v(t+dt) = v(t) + a*dt et x(t+dt) = x(t) + v*dt.
+    - La quadrature numérique de Simpson pour le calcul d'abscisse curviligne le long des arcs de virage.
+    - Les courbes de Bézier quadratiques B(t) pour les trajectoires de virage sans glissement en crabe.
+    - Le modèle de suivi de véhicule et régulation adaptative de vitesse (ACC - Adaptive Cruise Control).
+    - La gestion du couloir central d'urgence pour les véhicules d'intervention prioritaire (VTA).
+    - Les barrières physiques anti-superposition (Yellow Box et détection d'obstacles multi-points).
+
+Conformité Thread-Safety :
+    - Fonctionne sur son propre thread de calcul `QThread` (`MoteurSimulation`), rigoureusement découplé de la boucle GUI.
+    - Protège l'état partagé des entités mobiles par verrouillage systématique `QMutex` / `QMutexLocker`.
+    - Émet un instantané immuable (`list[EntiteSnapshot]`, `IntersectionManager`) via `pyqtSignal` à chaque pas (60 Hz)
+      pour alimenter l'interface graphique sans aucun risque d'accès concurrentiel (Règle d'or Qt).
+
+Conformité V2X / V2I :
+    - Déclenche les alertes V2I lors de la détection de véhicules prioritaires (VTA) en approche de l'intersection.
+    - Asservit les consignes de vitesse et d'engagement au cycle des feux tricolores régulés par le serveur SCADA.
 """
 
 import copy
@@ -24,14 +37,29 @@ logger = logging.getLogger(__name__)
 
 
 class EntiteSnapshot:
-    """Instantané immuable d'une entité mobile transmis à l'IHM."""
+    """Instantané immuable d'une entité mobile transmis à l'IHM via pyqtSignal.
+
+    Cette structure de données découple le thread de calcul cinématique du thread
+    principal Qt, garantissant une stricte conformité à la règle d'or Thread-Safety.
+    """
     pass
 
 
 class TrajectoireBezier:
-    """Courbe de Bézier quadratique B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2."""
+    """Courbe de Bézier quadratique B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2.
+
+    Modélise les virages à angle droit du carrefour sans téléportation angulaire
+    ni dérapage en crabe, avec orientation continue du vecteur cap tangentiel.
+    """
 
     def __init__(self, p0: tuple[float, float], p1: tuple[float, float], p2: tuple[float, float]):
+        """Initialise la courbe de Bézier quadratique avec ses trois points de contrôle.
+
+        Args:
+            p0 (tuple[float, float]): Point de départ à l'entrée du carrefour.
+            p1 (tuple[float, float]): Point de contrôle d'inflexion géométrique.
+            p2 (tuple[float, float]): Point d'arrivée aligné sur la voie de sortie.
+        """
         self.p0 = (float(p0[0]), float(p0[1]))
         self.p1 = (float(p1[0]), float(p1[1]))
         self.p2 = (float(p2[0]), float(p2[1]))
@@ -39,12 +67,34 @@ class TrajectoireBezier:
         self.longueur_arc = self._calculer_longueur_arc()
 
     def _calculer_longueur_arc(self, n: int = 16) -> float:
-        """Calcule la longueur d'arc par quadrature numérique de Simpson."""
+        """Calcule la longueur d'arc par quadrature numérique de Simpson.
+
+        Approximation de l'intégrale L = int_0^1 ||B'(s)|| ds par la méthode
+        composite de Simpson à n intervalles pairs :
+        L ≈ (h/3) * [f(0) + f(1) + 4*sum(f(s_impair)) + 2*sum(f(s_pair))]
+
+        Args:
+            n (int, optional): Nombre d'intervalles de discrétisation (pair). Par défaut 16.
+
+        Returns:
+            float: Longueur curviligne totale de la trajectoire en mètres.
+        """
         def norm_deriv(s: float) -> float:
+            """Calcule la norme euclidienne du vecteur dérivé ||B'(s)||.
+
+            Args:
+                s (float): Paramètre normalisé [0, 1].
+
+            Returns:
+                float: Norme de la vitesse tangentielle géométrique.
+            """
             dx = 2.0 * (1.0 - s) * (self.p1[0] - self.p0[0]) + 2.0 * s * (self.p2[0] - self.p1[0])
             dy = 2.0 * (1.0 - s) * (self.p1[1] - self.p0[1]) + 2.0 * s * (self.p2[1] - self.p1[1])
             return math.hypot(dx, dy)
 
+        # --- Quadrature numérique composite de Simpson (N=16 sous-intervalles) ---
+        # Approximation de la longueur curviligne L = ∫_0^1 ||B'(s)|| ds sans dépendance externe (pur Python).
+        # Règle composite : L ≈ (h / 3) * [f(s0) + f(sn) + 4*∑ f(s_impairs) + 2*∑ f(s_pairs)] avec h = 1/n.
         h = 1.0 / n
         somme = norm_deriv(0.0) + norm_deriv(1.0)
         for i in range(1, n):
@@ -54,7 +104,18 @@ class TrajectoireBezier:
         return max(0.1, (h / 3.0) * somme)
 
     def point(self, t: float) -> tuple[float, float]:
-        """Évalue les coordonnées cartésiennes B(t)."""
+        """Évalue les coordonnées cartésiennes B(t) sur la courbe.
+
+        Formule de Bernstein d'ordre 2 :
+        B(t) = (1-t)^2 * P0 + 2(1-t)t * P1 + t^2 * P2
+
+        Args:
+            t (float): Paramètre normalisé compris dans [0.0, 1.0].
+
+        Returns:
+            tuple[float, float]: Position (x, y) en mètres dans le repère global.
+        """
+        # Évaluation des polynômes de Bernstein de degré 2 pour un virage fluide sans glissement
         t = max(0.0, min(1.0, float(t)))
         u = 1.0 - t
         x = u * u * self.p0[0] + 2.0 * u * t * self.p1[0] + t * t * self.p2[0]
@@ -62,23 +123,56 @@ class TrajectoireBezier:
         return x, y
 
     def tangente(self, t: float) -> tuple[float, float]:
-        """Évalue le vecteur vitesse tangentiel B'(t)."""
+        """Évalue le vecteur vitesse tangentiel B'(t).
+
+        Dérivée première exacte :
+        B'(t) = 2(1-t)(P1 - P0) + 2t(P2 - P1)
+
+        Args:
+            t (float): Paramètre normalisé [0.0, 1.0].
+
+        Returns:
+            tuple[float, float]: Vecteur directeur tangent (dx, dy).
+        """
         t = max(0.0, min(1.0, float(t)))
         dx = 2.0 * (1.0 - t) * (self.p1[0] - self.p0[0]) + 2.0 * t * (self.p2[0] - self.p1[0])
         dy = 2.0 * (1.0 - t) * (self.p1[1] - self.p0[1]) + 2.0 * t * (self.p2[1] - self.p1[1])
         return dx, dy
 
     def derivee(self, t: float) -> tuple[float, float]:
-        """Évalue le vecteur vitesse tangentiel B'(t) (alias de tangente)."""
+        """Évalue le vecteur vitesse tangentiel B'(t) (alias de tangente).
+
+        Args:
+            t (float): Paramètre normalisé [0.0, 1.0].
+
+        Returns:
+            tuple[float, float]: Vecteur directeur tangent (dx, dy).
+        """
         return self.tangente(t)
 
     def cap(self, t: float) -> float:
-        """Calcule l'angle tangentiel exact de la trajectoire en radians."""
+        """Calcule l'angle tangentiel exact de la trajectoire en radians.
+
+        psi(t) = atan2(dy/dt, dx/dt)
+
+        Args:
+            t (float): Paramètre normalisé [0.0, 1.0].
+
+        Returns:
+            float: Cap en radians dans [-pi, pi].
+        """
         dx, dy = self.tangente(t)
         return math.atan2(dy, dx)
 
     def cap_tangentiel(self, t: float) -> float:
-        """Calcule l'angle tangentiel exact en radians (alias de cap)."""
+        """Calcule l'angle tangentiel exact en radians (alias de cap).
+
+        Args:
+            t (float): Paramètre normalisé [0.0, 1.0].
+
+        Returns:
+            float: Cap en radians dans [-pi, pi].
+        """
         return self.cap(t)
 
 
@@ -90,6 +184,12 @@ def calculer_points_bezier_virage(*args) -> tuple[tuple[float, float], tuple[flo
     P0 : Point d'entrée de l'intersection sur la voie d'origine
     P1 : Point d'inflexion (intersection géométrique de la voie d'entrée et de sortie)
     P2 : Point d'alignement sur la voie de sortie
+
+    Args:
+        *args: Soit (entite,), soit (pos_x, pos_y, cap, action_intersection).
+
+    Returns:
+        tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None: Triplet (P0, P1, P2) ou None.
     """
     if len(args) == 1:
         entite = args[0]
@@ -195,24 +295,37 @@ class MoteurSimulation(QThread):
         self._vehicules_entree_carrefour = {}
         self.temps_dernier_spawn = 0.0
         self.cpt_id = 9000
+        self.temps_dernier_vta_auto = 0.0
 
     @property
     def temps_franchissement_moyen_vta(self) -> float:
-        """Temps moyen de franchissement mesuré pour les véhicules prioritaires VTA (s)."""
+        """Temps moyen de franchissement mesuré pour les véhicules prioritaires VTA (s).
+
+        Returns:
+            float: Durée moyenne de franchissement en secondes (0.0 si aucun VTA n'a traversé).
+        """
         if self.temps_vta_traverses:
             return sum(self.temps_vta_traverses) / len(self.temps_vta_traverses)
         return 0.0
 
     @property
     def temps_franchissement_moyen_global(self) -> float:
-        """Temps moyen de franchissement mesuré pour l'ensemble des véhicules (s)."""
+        """Temps moyen de franchissement mesuré pour l'ensemble des véhicules (s).
+
+        Returns:
+            float: Durée moyenne de franchissement en secondes (0.0 si aucun véhicule n'a traversé).
+        """
         if self.temps_vehicules_traverses:
             return sum(self.temps_vehicules_traverses) / len(self.temps_vehicules_traverses)
         return 0.0
 
     @property
     def gain_temps_estime_pct(self) -> float:
-        """Gain de temps estimé en pourcentage grâce à la préemption prioritaire V2I."""
+        """Gain de temps estimé en pourcentage grâce à la préemption prioritaire V2I.
+
+        Returns:
+            float: Pourcentage de réduction du temps de traversée pour les véhicules VTA.
+        """
         t_vta = self.temps_franchissement_moyen_vta
         t_ref = self.temps_franchissement_moyen_global if self.temps_franchissement_moyen_global > 0 else 8.5
         if t_vta > 0 and t_ref > t_vta:
@@ -220,7 +333,16 @@ class MoteurSimulation(QThread):
         return 45.0 if self.preemption_v2i_active else 0.0
 
     def ajouter_entite(self, entite):
-        """Ajoute une nouvelle entité dans la simulation de manière sécurisée (thread-safe)."""
+        """Ajoute une nouvelle entité dans la simulation de manière sécurisée (thread-safe).
+
+        Aucun plafond de capacité ne restreint l'insertion manuelle.
+
+        Args:
+            entite (Vehicule): Instance de véhicule, cycliste ou piéton à injecter.
+
+        Returns:
+            None
+        """
         with QMutexLocker(self.mutex):
             try:
                 entite.voie_cible_y = entite.pos_y
@@ -243,23 +365,74 @@ class MoteurSimulation(QThread):
                         entite.pos_x = -3.6 * sign
                         entite.voie_cible_x = entite.pos_x
 
-                # Véhicule d'urgence VTA : toujours tout droit
+                # Véhicule d'urgence VTA : toujours tout droit et horodatage de présence
                 if getattr(entite, 'type_entite', None) == TypeVehicule.VIG_VTA:
                     entite.action_intersection = None
                     entite.en_virage_bezier = False
                     entite.trajectoire_bezier = None
+                    self.temps_dernier_vta_auto = self.temps_ecoule
 
                 self.entites.append(entite)
             except Exception as e:
                 logger.error(f"[MoteurSimulation] Erreur lors de l'insertion de l'entité : {e}", exc_info=True)
 
     def vider_entites(self):
-        """Supprime l'intégralité des entités de la simulation de manière thread-safe."""
+        """Supprime l'intégralité des entités de la simulation de manière thread-safe.
+
+        Returns:
+            None
+        """
         with QMutexLocker(self.mutex):
             try:
                 self.entites.clear()
             except Exception as e:
                 logger.error(f"[MoteurSimulation] Erreur lors de la suppression des entités : {e}", exc_info=True)
+
+    def emettre_snapshot_immediat(self) -> tuple[list[EntiteSnapshot], IntersectionManager]:
+        """Génère et émet immédiatement un instantané immuable vers l'IHM même en mode pause.
+
+        Returns:
+            tuple[list[EntiteSnapshot], IntersectionManager]: Les instantanés générés et transmis.
+        """
+        with QMutexLocker(self.mutex):
+            copie_entites = [copy.deepcopy(e) for e in self.entites]
+
+        safe_entites = []
+        for e in copie_entites:
+            snap = EntiteSnapshot()
+            snap.id_entite = getattr(e, 'id_entite', None)
+            snap.type_entite = getattr(e, 'type_entite', None)
+            snap.pos_x = getattr(e, 'pos_x', 0.0)
+            snap.pos_y = getattr(e, 'pos_y', 0.0)
+            snap.cap = getattr(e, 'cap', 0.0)
+            snap.longueur_m = getattr(e, 'longueur_m', 4.0)
+            snap.largeur_m = getattr(e, 'largeur_m', 1.8)
+            snap.vitesse = getattr(e, 'vitesse', 0.0)
+            snap.vitesse_kmh = getattr(e, 'vitesse_kmh', 0.0)
+            snap.masse_kg = getattr(e, 'masse_kg', 1000.0)
+            snap.freinage_mecanique = getattr(e, 'freinage_mecanique', False)
+            snap.commande_acceleration = getattr(e, 'commande_acceleration', 0.0)
+            snap.possede_abs = getattr(e, 'possede_abs', False)
+            snap.age_pneus = getattr(e, 'age_pneus', 0.0)
+            snap.usure_pneus = getattr(e, 'usure_pneus', 0.0)
+            snap.action_intersection = getattr(e, 'action_intersection', None)
+            snap.cap_cible = getattr(e, 'cap_cible', snap.cap)
+            snap.indicateur_virage = getattr(e, 'indicateur_virage', 0)
+            snap.en_virage_bezier = getattr(e, 'en_virage_bezier', False)
+            snap.en_panne = getattr(e, 'en_panne', False)
+            snap.etat_depassement = getattr(e, 'etat_depassement', 0)
+            snap.obstacle_nature = getattr(e, 'obstacle_nature', 'Aucun')
+            snap.distance_obstacle = getattr(e, 'distance_arret', 999.0)
+            safe_entites.append(snap)
+
+        safe_inter = copy.deepcopy(self.intersection)
+        safe_inter.preemption_v2i_active = self.preemption_v2i_active
+        safe_inter.temps_franchissement_moyen_vta = self.temps_franchissement_moyen_vta
+        safe_inter.gain_temps_estime_pct = self.gain_temps_estime_pct
+        safe_inter.vehicules_franchis_total = self.vehicules_franchis_total
+        safe_inter.mu = self.environnement.calculer_coefficient_friction()
+        self.tick_simulation.emit(safe_entites, safe_inter)
+        return safe_entites, safe_inter
 
     def demarrer(self):
         """Active le drapeau d'exécution et lance le fil d'exécution (QThread)."""
@@ -279,6 +452,13 @@ class MoteurSimulation(QThread):
         1. Pare-chocs avant
         2. Centre géométrique
         3. Pare-chocs arrière
+
+        Args:
+            entite (Vehicule): Entité cinématique dont on calcule les points.
+
+        Returns:
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+                Points (avant, centre, arrière) en coordonnées monde (mètres).
         """
         demi_l = entite.longueur_m / 2.0
         cos_c = math.cos(entite.cap)
@@ -292,8 +472,15 @@ class MoteurSimulation(QThread):
     def projeter_point_repere_local(px, py, front_x, front_y, theta):
         """Projette un point monde (px, py) dans le repère local défini par l'origine (front_x, front_y) et le cap theta.
 
+        Args:
+            px (float): Coordonnée X absolue du point cible (m).
+            py (float): Coordonnée Y absolue du point cible (m).
+            front_x (float): Coordonnée X de l'origine du repère local (m).
+            front_y (float): Coordonnée Y de l'origine du repère local (m).
+            theta (float): Cap d'orientation du repère local (radians).
+
         Returns:
-            tuple[float, float]: (dist_longitudinale, dist_laterale)
+            tuple[float, float]: (dist_longitudinale, dist_laterale) en mètres.
         """
         dx = px - front_x
         dy = py - front_y
@@ -375,6 +562,10 @@ class MoteurSimulation(QThread):
     def verifier_yellow_box(self, entite, autres_entites):
         """Règle 5 : Vérifie si la voie de sortie du carrefour est encombrée avant de s'y engager.
 
+        Args:
+            entite (Vehicule): Véhicule s'apprêtant à franchir l'intersection.
+            autres_entites (list[Vehicule]): Ensemble des autres entités présentes sur le réseau.
+
         Returns:
             bool: True si la voie de sortie est encombrée par un véhicule à l'arrêt dans le même sens.
         """
@@ -419,6 +610,12 @@ class MoteurSimulation(QThread):
         """Exécute une itération unique d'intégration physique et comportementale.
 
         Cette méthode est isolée pour permettre des tests unitaires et déterministes.
+
+        Args:
+            dt (float): Pas d'intégration temporelle en secondes (typiquement 1/60s).
+
+        Returns:
+            None
         """
         self.temps_ecoule += dt
 
@@ -427,6 +624,9 @@ class MoteurSimulation(QThread):
             self.intersection.update(dt)
 
         # 2. Filtrage spatial et extraction d'une copie locale immuable sous mutex
+        # RÈGLE D'OR THREAD-SAFETY : Verrouillage strict par QMutexLocker pour éviter
+        # les collisions d'accès concurrentiel entre l'ajout/suppression d'entités depuis
+        # l'IHM et l'itération du moteur physique sur la liste self.entites.
         with QMutexLocker(self.mutex):
             self.entites = [
                 e for e in self.entites
@@ -480,27 +680,66 @@ class MoteurSimulation(QThread):
             maintenant = self.temps_ecoule
             if not hasattr(self, 'cpt_id'):
                 self.cpt_id = 9000
+            if not hasattr(self, 'temps_dernier_vta_auto'):
+                self.temps_dernier_vta_auto = 0.0
+
+            # Détection de la présence de VTA sur la carte
+            vta_sur_carte = [e for e in copie_entites if getattr(e, 'type_entite', None) == TypeVehicule.VIG_VTA]
+            aucun_vta_sur_carte = (len(vta_sur_carte) == 0)
+            temps_sans_vta = max(0.0, maintenant - self.temps_dernier_vta_auto)
+            forcer_vta = aucun_vta_sur_carte and (temps_sans_vta > 15.0)
+
             ref_temps = getattr(self, 'temps_dernier_spawn', 0.0)
             if ref_temps > 1e8:
                 declencher_spawn = (time.time() - ref_temps > 2.5)
                 if declencher_spawn:
                     self.temps_dernier_spawn = time.time()
             else:
-                declencher_spawn = (maintenant - ref_temps >= 2.5) or (ref_temps == 0.0 and len(copie_entites) == 0)
+                declencher_spawn = (
+                    (maintenant - ref_temps >= 2.5)
+                    or (ref_temps == 0.0 and len(copie_entites) == 0)
+                    or (forcer_vta and (maintenant - ref_temps >= 1.0))
+                )
                 if declencher_spawn:
                     self.temps_dernier_spawn = maintenant
 
             if declencher_spawn:
-                if len(copie_entites) >= 12:
+                if len(copie_entites) >= 12 and not forcer_vta:
                     pass
                 else:
                     self.cpt_id += 1
 
-                    type_aleatoire = random.choices(
-                        [TypeVehicule.VOITURE, TypeVehicule.POIDS_LOURD, TypeVehicule.CYCLISTE],
-                        weights=[0.70, 0.15, 0.15],
-                        k=1
-                    )[0]
+                    axe = random.choice(['x', 'y'])
+                    sens = random.choice([1, -1])
+
+                    vta_sur_cet_axe = any(
+                        getattr(e, 'est_axe_x', False) == (axe == 'x') for e in vta_sur_carte
+                    )
+
+                    if forcer_vta:
+                        type_aleatoire = TypeVehicule.VIG_VTA
+                    else:
+                        if not vta_sur_cet_axe:
+                            type_aleatoire = random.choices(
+                                [
+                                    TypeVehicule.VOITURE,
+                                    TypeVehicule.POIDS_LOURD,
+                                    TypeVehicule.CYCLISTE,
+                                    TypeVehicule.VIG_VTA,
+                                ],
+                                weights=[0.62, 0.15, 0.13, 0.10],
+                                k=1
+                            )[0]
+                        else:
+                            type_aleatoire = random.choices(
+                                [
+                                    TypeVehicule.VOITURE,
+                                    TypeVehicule.POIDS_LOURD,
+                                    TypeVehicule.CYCLISTE,
+                                ],
+                                weights=[0.62, 0.15, 0.13],
+                                k=1
+                            )[0]
 
                     masse = 1500.0
                     if type_aleatoire == TypeVehicule.VOITURE:
@@ -509,10 +748,10 @@ class MoteurSimulation(QThread):
                         masse = max(10000.0, random.gauss(25000.0, 3000.0))
                     elif type_aleatoire == TypeVehicule.CYCLISTE:
                         masse = max(40.0, random.gauss(90.0, 15.0))
+                    elif type_aleatoire == TypeVehicule.VIG_VTA:
+                        masse = max(2500.0, random.gauss(3500.0, 300.0))
 
                     nouveau_vehicule = Vehicule(str(self.cpt_id), type_aleatoire, masse)
-                    axe = random.choice(['x', 'y'])
-                    sens = random.choice([1, -1])
 
                     if type_aleatoire == TypeVehicule.CYCLISTE:
                         if axe == 'x':
@@ -526,6 +765,18 @@ class MoteurSimulation(QThread):
                         nouveau_vehicule.vitesse = 5.5
                         nouveau_vehicule.action_intersection = None
                         nouveau_vehicule.en_virage_bezier = False
+                    elif type_aleatoire == TypeVehicule.VIG_VTA:
+                        if axe == 'x':
+                            nouveau_vehicule.pos_x = -48.0 * sens
+                            nouveau_vehicule.pos_y = 2.0 * sens
+                            nouveau_vehicule.cap = 0.0 if sens == 1 else math.pi
+                        else:
+                            nouveau_vehicule.pos_y = -48.0 * sens
+                            nouveau_vehicule.pos_x = -2.0 * sens
+                            nouveau_vehicule.cap = math.pi / 2 if sens == 1 else -math.pi / 2
+                        nouveau_vehicule.vitesse = 16.0
+                        nouveau_vehicule.action_intersection = None
+                        nouveau_vehicule.en_virage_bezier = False
                     else:
                         if axe == 'x':
                             nouveau_vehicule.pos_x = -48.0 * sens
@@ -537,20 +788,44 @@ class MoteurSimulation(QThread):
                             nouveau_vehicule.cap = math.pi / 2 if sens == 1 else -math.pi / 2
                         nouveau_vehicule.vitesse = 10.0
 
-                    chevauchement = False
-                    for entite_existante in copie_entites:
-                        if math.hypot(
-                            entite_existante.pos_x - nouveau_vehicule.pos_x,
-                            entite_existante.pos_y - nouveau_vehicule.pos_y,
-                        ) < 15.0:
-                            chevauchement = True
-                            break
+                    def test_chevauchement(v_cand):
+                        for entite_existante in copie_entites:
+                            if math.hypot(
+                                entite_existante.pos_x - v_cand.pos_x,
+                                entite_existante.pos_y - v_cand.pos_y,
+                            ) < 15.0:
+                                return True
+                        return False
+
+                    chevauchement = test_chevauchement(nouveau_vehicule)
+
+                    if chevauchement and forcer_vta:
+                        autres_voies = [('x', 1), ('x', -1), ('y', 1), ('y', -1)]
+                        random.shuffle(autres_voies)
+                        for a_c, s_c in autres_voies:
+                            if a_c == axe and s_c == sens:
+                                continue
+                            if a_c == 'x':
+                                nouveau_vehicule.pos_x = -48.0 * s_c
+                                nouveau_vehicule.pos_y = 2.0 * s_c
+                                nouveau_vehicule.cap = 0.0 if s_c == 1 else math.pi
+                            else:
+                                nouveau_vehicule.pos_y = -48.0 * s_c
+                                nouveau_vehicule.pos_x = -2.0 * s_c
+                                nouveau_vehicule.cap = math.pi / 2 if s_c == 1 else -math.pi / 2
+                            if not test_chevauchement(nouveau_vehicule):
+                                chevauchement = False
+                                axe = a_c
+                                sens = s_c
+                                break
 
                     if not chevauchement:
-                        if type_aleatoire != TypeVehicule.CYCLISTE and random.random() < 0.20:
+                        if type_aleatoire not in (TypeVehicule.CYCLISTE, TypeVehicule.VIG_VTA) and random.random() < 0.20:
                             direction_virage = random.choice([-math.pi / 2, math.pi / 2])
                             nouveau_vehicule.action_intersection = nouveau_vehicule.cap + direction_virage
                         self.ajouter_entite(nouveau_vehicule)
+                        if type_aleatoire == TypeVehicule.VIG_VTA:
+                            self.temps_dernier_vta_auto = maintenant
         except Exception as e_spawn:
             logger.error(f"[MoteurSimulation] Erreur génération automatique : {e_spawn}", exc_info=True)
 
@@ -1083,7 +1358,18 @@ class MoteurSimulation(QThread):
                                     entite.pos_x += step_lat
 
         # -------------------------------------------------------------
-        # 6. INTÉGRATION CINÉMATIQUE D'EULER & BARRIÈRE ANTI-CLIPPING (RÈGLE 5)
+        # 6. INTÉGRATION CINÉMATIQUE D'EULER & COURBES DE BÉZIER B(t)
+        # -------------------------------------------------------------
+        # Équations différentielles du mouvement résolues au premier ordre (Euler explicite) :
+        # 1) Bilan des forces longitudinales :
+        #    F_nette = F_moteur - F_aérodynamique - F_frottement_roulement
+        # 2) Accélération nette : a_nette = F_nette / masse
+        # 3) Intégration de la vitesse scalaire : v(t + dt) = max(0, v(t) + a_nette * dt)
+        # 4) Intégration de la position cartésienne :
+        #    - En ligne droite : x(t + dt) = x(t) + v * cos(psi) * dt
+        #                        y(t + dt) = y(t) + v * sin(psi) * dt
+        #    - En virage Bézier : progression paramétrique dt_prog = dt * (v / L_arc)
+        #                         t = t + dt_prog, puis évaluation B(t) et cap tangentiel psi(t)
         # -------------------------------------------------------------
         for entite in copie_entites:
             if getattr(entite, 'type_entite', None) != TypeVehicule.PIETON:
@@ -1224,6 +1510,9 @@ class MoteurSimulation(QThread):
             safe_inter.temps_franchissement_moyen_vta = self.temps_franchissement_moyen_vta
             safe_inter.gain_temps_estime_pct = self.gain_temps_estime_pct
             safe_inter.vehicules_franchis_total = self.vehicules_franchis_total
+            # RÈGLE D'OR THREAD-SAFETY : Émission d'instantanés immuables via pyqtSignal.
+            # L'IHM Qt principale reçoit les données par la boucle événementielle sans
+            # risque de corruption de mémoire ni blocage de rendu graphique.
             safe_inter.mu = self.environnement.calculer_coefficient_friction()
             self.tick_simulation.emit(safe_entites, safe_inter)
         except Exception as e_emit:

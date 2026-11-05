@@ -1,9 +1,21 @@
-"""Module de gestion de l'environnement physique et météorologique du carrefour.
+"""Module de gestion de l'environnement physique et météorologique — Projet Esk-2718.
 
-Ce module modélise les conditions ambiantes impactant directement l'adhérence
-des véhicules au sol : température, niveau d'usure de la chaussée, hauteur
-d'eau superficielle et météo générale (dégagé, pluie, gel).
-Il fournit le calcul physique dynamique du coefficient de friction (adhérence pneu-chaussée).
+Rôle architectural :
+    Modélisation des grandeurs physiques et ambiantes de la chaussée : température (°C),
+    usure mécanique de l'asphalte (0.0 à 1.0), hauteur du film d'eau (mm) et conditions
+    météo (`ConditionsMeteo.DEGAGE`, `PLUIE`, `GEL`).
+    Calcule dynamiquement le coefficient de friction effectif (µ) pneu-route par loi
+    tribologique multi-composantes.
+
+Conformité Thread-Safety :
+    Classe purement computationnelle sans état partagé mutable non contrôlé.
+    Les validations physiques strictes dans les setters préviennent les états invalides,
+    permettant des lectures et calculs concurrents sûrs depuis le fil cinématique.
+
+Conformité V2X / V2I :
+    Les dégradations d'adhérence calculées impactent directement les distances de freinage
+    et les décélérations maximales, conditionnant le déclenchement anticipé des alertes
+    V2I pour préserver les marges de sécurité lors des préemptions d'urgence.
 """
 
 import logging

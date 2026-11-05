@@ -1,19 +1,32 @@
-"""Scène graphique 2D haute performance et vue interactive pour la visualisation du carrefour.
+"""Scène graphique 2D haute performance et vue interactive Cyber-SCADA — Projet Esk-2718.
 
-Ce module implémente :
-- `CarrefourView` : Sous-classe `QGraphicsView` avec zéro scrollbar, auto-adaptation (`fitInView`),
-  zoom molette fluide (0.7x à 3.0x) et réinitialisation par double-clic ou touche R.
-- `CarrefourScene` : Scène graphique vectorielle riche style « Smart City » / SCADA préfectoral
-  (4 îlots architecturaux aux coins, trottoirs structurés, pistes cyclables, damier d'intersection,
-  lampadaires avec halos lumineux météo, feux et antenne RSU cliquables, étiquette HUD flottante).
-Conforme aux exigences de la SAÉ 3.02 (Esk-2718).
+Rôle architectural :
+    Composant central de rendu 2D vectoriel du carrefour urbain.
+    Ce module implémente :
+    - `CarrefourView` : Sous-classe `QGraphicsView` avec zéro scrollbar, auto-adaptation (`fitInView`),
+      zoom molette fluide (0.7x à 3.0x) et réinitialisation par double-clic ou touche R.
+    - `CarrefourScene` : Scène graphique vectorielle riche style « Smart City » / SCADA préfectoral
+      (4 îlots architecturaux aux coins, trottoirs structurés, pistes cyclables, damier d'intersection,
+      lampadaires avec halos lumineux météo, feux et antenne RSU cliquables, étiquette HUD flottante).
+
+Conformité Thread-Safety :
+    Conforme à la Règle d'or Qt : la scène et tous ses `QGraphicsItem` sont instanciés,
+    mis à jour et détruits exclusivement sur le fil principal de rendu graphique GUI.
+    Les données physiques issues du `MoteurSimulation` sont consommées via le slot
+    `mettre_a_jour_entites` sans aucun accès concurrent direct aux structures du moteur.
+    La libération mémoire s'effectue via `self.removeItem(item)` et `del item`.
+
+Conformité V2X / V2I :
+    Restitution visuelle haute fidélité des communications véhicule-infrastructure :
+    - Visualisation de l'antenne RSU (Roadside Unit) émettant des ondes radio modulées.
+    - Faisceau directionnel et couloir d'urgence matérialisant l'onde de préemption VTA.
+    - Badges dynamiques incrustés sur les têtes de feux affichant le décompte temps restant.
 """
 
 import logging
 import math
 import random
 
-import PyQt6.sip as sip
 from PyQt6.QtCore import QObject, QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
@@ -52,9 +65,10 @@ class CarrefourView(QGraphicsView):
 
         Args:
             scene (QGraphicsScene): Scène vectorielle à afficher.
-            parent (QWidget | None): Widget parent Qt.
+            parent (QWidget | None, optional): Widget parent Qt. Par défaut None.
         """
         super().__init__(scene, parent)
+        self.main_window = parent
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -76,7 +90,11 @@ class CarrefourView(QGraphicsView):
         self.fit_scene()
 
     def wheelEvent(self, event):
-        """Zoom/dézoom fluide centré sur le curseur de souris, borné entre 0.7x et 3.0x."""
+        """Zoom/dézoom fluide centré sur le curseur de souris, borné entre 0.7x et 3.0x.
+
+        Args:
+            event (QWheelEvent): Événement molette de la souris.
+        """
         delta = event.angleDelta().y()
         if delta == 0:
             return
@@ -105,7 +123,11 @@ class CarrefourView(QGraphicsView):
         event.accept()
 
     def keyPressEvent(self, event):
-        """Raccourci clavier 'R' pour réinitialiser la vue (fitInView)."""
+        """Raccourci clavier 'R' pour réinitialiser la vue (fitInView).
+
+        Args:
+            event (QKeyEvent): Événement d'appui sur une touche du clavier.
+        """
         if event.key() == Qt.Key.Key_R:
             self.fit_scene()
             event.accept()
@@ -113,21 +135,66 @@ class CarrefourView(QGraphicsView):
         super().keyPressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        """Réinitialise la vue à 100% (fitInView) lors d'un double-clic."""
+        """Réinitialise la vue à 100% (fitInView) lors d'un double-clic.
+
+        Args:
+            event (QMouseEvent): Événement de double-clic de la souris.
+        """
         self.fit_scene()
         event.accept()
 
     def resizeEvent(self, event):
-        """Adapte automatiquement l'échelle lors du redimensionnement de la fenêtre."""
+        """Adapte automatiquement l'échelle lors du redimensionnement de la fenêtre.
+
+        Args:
+            event (QResizeEvent): Événement de redimensionnement de la vue.
+        """
         super().resizeEvent(event)
         self.fit_scene()
 
     def mouseMoveEvent(self, event):
-        """Transmet systématiquement les événements de mouvement souris à CarrefourScene."""
+        """Transmet systématiquement les événements de mouvement souris à CarrefourScene.
+
+        Args:
+            event (QMouseEvent): Événement de déplacement du curseur.
+        """
         super().mouseMoveEvent(event)
 
+    def mousePressEvent(self, event):
+        """Gère le clic souris en désactivant temporairement le drag pour propager l'événement de placement.
+
+        Args:
+            event (QMouseEvent): Événement de clic souris.
+
+        Returns:
+            None
+        """
+        fenetre = getattr(self, "main_window", None)
+        if fenetre is None and callable(getattr(self, "parent", None)):
+            fenetre = self.parent()
+        if fenetre is None and self.scene() is not None:
+            fenetre = getattr(self.scene(), "main_window", None)
+            if fenetre is None and callable(getattr(self.scene(), "parent", None)):
+                fenetre = self.scene().parent()
+        type_a_placer = getattr(fenetre, "type_a_placer", None)
+
+        if type_a_placer is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            try:
+                super().mousePressEvent(event)
+            finally:
+                if getattr(fenetre, "type_a_placer", None) is None:
+                    self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            return
+
+        super().mousePressEvent(event)
+
     def showEvent(self, event):
-        """Ajuste la vue dès son apparition à l'écran."""
+        """Ajuste la vue dès son apparition à l'écran.
+
+        Args:
+            event (QShowEvent): Événement d'affichage initial de la vue.
+        """
         super().showEvent(event)
         QTimer.singleShot(0, self.fit_scene)
 
@@ -156,9 +223,15 @@ class CarrefourScene(QGraphicsScene):
     signal_toggle_preemption_v2i = pyqtSignal()
 
     def __init__(self, parent=None):
-        """Initialise la scène graphique, son repère métrique et le décor Smart City."""
+        """Initialise la scène graphique, son repère métrique et le décor Smart City.
+
+        Args:
+            parent (QWidget | None, optional): Fenêtre principale parente. Par défaut None.
+        """
         super().__init__(parent if isinstance(parent, QObject) else None)
         self.main_window = parent
+        self.echelle = self.PIXELS_PAR_METRE
+        self.SCALE = self.PIXELS_PAR_METRE
 
         # Définition du cadre spatial (-500px à +500px, soit 100m x 100m)
         self.setSceneRect(-500, -500, 1000, 1000)
@@ -198,17 +271,23 @@ class CarrefourScene(QGraphicsScene):
         self._draw_infrastructure()
 
     def clear(self):
-        """Réinitialise intégralement la scène et détruit proprement les objets C++."""
+        """Réinitialise intégralement la scène et détruit proprement les objets graphiques."""
         try:
             for liste in self.pool_vehicules.values():
                 for vue in liste:
-                    if not sip.isdeleted(vue):
-                        sip.delete(vue)
+                    try:
+                        self.removeItem(vue)
+                    except Exception:
+                        pass
+                    del vue
             self.pool_vehicules.clear()
 
             for vue, _ in self.vues_entites.values():
-                if not sip.isdeleted(vue):
-                    sip.delete(vue)
+                try:
+                    self.removeItem(vue)
+                except Exception:
+                    pass
+                del vue
             self.vues_entites.clear()
 
             self.objets_meteo.clear()
@@ -222,15 +301,22 @@ class CarrefourScene(QGraphicsScene):
             self.pictogrammes_velo.clear()
 
             for trace in self.traces_pneus:
-                if not sip.isdeleted(trace):
-                    sip.delete(trace)
+                try:
+                    self.removeItem(trace)
+                except Exception:
+                    pass
+                del trace
             self.traces_pneus.clear()
 
-            if self.verglas_overlay is not None and not sip.isdeleted(self.verglas_overlay):
+            if self.verglas_overlay is not None:
                 self.verglas_overlay.setVisible(False)
 
-            if self.hologramme is not None and not sip.isdeleted(self.hologramme):
-                sip.delete(self.hologramme)
+            if self.hologramme is not None:
+                try:
+                    self.removeItem(self.hologramme)
+                except Exception:
+                    pass
+                del self.hologramme
             self.hologramme = None
             self.type_hologramme = None
 
@@ -240,7 +326,11 @@ class CarrefourScene(QGraphicsScene):
             logger.error(f"[CarrefourScene] Erreur lors du nettoyage de la scène : {e}", exc_info=True)
 
     def set_meteo(self, etat: str):
-        """Met à jour les effets visuels (flaques, verglas, lampadaires) selon la météo."""
+        """Met à jour les effets visuels (flaques, verglas, lampadaires) selon la météo.
+
+        Args:
+            etat (str): État météorologique ('Dégagé', 'Pluie', 'Tempête', 'Gel').
+        """
         try:
             self.meteo = etat
             visibilite_pluie = (etat in ("Pluie", "Tempête"))
@@ -258,7 +348,11 @@ class CarrefourScene(QGraphicsScene):
             logger.error(f"[CarrefourScene] Erreur set_meteo ({etat}) : {e}", exc_info=True)
 
     def set_preemption_v2i_active(self, active: bool):
-        """Active/désactive le retour visuel radio sur la station RSU."""
+        """Active/désactive le retour visuel radio sur la station RSU.
+
+        Args:
+            active (bool): True pour activer les ondes V2I cyan vif, False pour onde grise passive.
+        """
         self.preemption_v2i_active = active
         couleur_onde = QColor(0, 229, 255, 160) if active else QColor(100, 116, 139, 60)
         for onde in self.rsu_ondes:
@@ -485,6 +579,13 @@ class CarrefourScene(QGraphicsScene):
 
             # Pictogrammes vélo peints en blanc sur chaque piste cyclable
             def ajouter_pictogramme_velo(cx, cy, rotation_deg=0):
+                """Ajoute un pictogramme cycliste vectoriel sur la piste cyclable.
+
+                Args:
+                    cx (float): Coordonnée X du centre du vélo.
+                    cy (float): Coordonnée Y du centre du vélo.
+                    rotation_deg (float, optional): Orientation angulaire en degrés. Par défaut 0.
+                """
                 p_blanc = QPen(QColor("#FFFFFF"), 1.5)
                 b_vide = QBrush(Qt.GlobalColor.transparent)
                 r1 = self.addEllipse(cx - 7, cy - 3, 6, 6, p_blanc, b_vide)
@@ -637,6 +738,17 @@ class CarrefourScene(QGraphicsScene):
             # =========================================================
             # Boîtiers feux avec curseur main
             def creer_boitier_feu(bx, by, w, h):
+                """Crée un boîtier visuel interactif pour un feu tricolore cliquable.
+
+                Args:
+                    bx (float): Coordonnée X supérieure gauche.
+                    by (float): Coordonnée Y supérieure gauche.
+                    w (float): Largeur du boîtier.
+                    h (float): Hauteur du boîtier.
+
+                Returns:
+                    QGraphicsRectItem: Item graphique du boîtier interactif.
+                """
                 box = self.addRect(bx, by, w, h, QPen(QColor("#00E5FF"), 1), QBrush(QColor("#0F172A")))
                 box.setZValue(15)
                 box.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -806,7 +918,14 @@ class CarrefourScene(QGraphicsScene):
             logger.error(f"[CarrefourScene] Erreur lors du dessin de l'infrastructure : {e}", exc_info=True)
 
     def _obtenir_couleur_qt(self, enum_feu: CouleurFeu) -> QColor:
-        """Convertit CouleurFeu en objet QColor."""
+        """Convertit CouleurFeu en objet QColor.
+
+        Args:
+            enum_feu (CouleurFeu): Constante de couleur (VERT, ORANGE, ROUGE).
+
+        Returns:
+            QColor: Objet QColor correspondant pour le pinceau Qt.
+        """
         try:
             if enum_feu == CouleurFeu.VERT:
                 return QColor("#10B981")
@@ -817,7 +936,14 @@ class CarrefourScene(QGraphicsScene):
             return QColor("#EF4444")
 
     def _create_vehicle_view(self, entite: EntitePhysique) -> tuple[QGraphicsRectItem, QGraphicsRectItem]:
-        """Instancie la représentation vectorielle composite d'une entité mobile."""
+        """Instancie la représentation vectorielle composite d'une entité mobile.
+
+        Args:
+            entite (EntitePhysique): Entité cinématique dont on construit le rendu.
+
+        Returns:
+            tuple[QGraphicsRectItem, QGraphicsRectItem]: (groupe_graphique, hitbox_cliquable).
+        """
         largeur_px = entite.longueur_m * self.PIXELS_PAR_METRE
         hauteur_px = entite.largeur_m * self.PIXELS_PAR_METRE
 
@@ -913,7 +1039,14 @@ class CarrefourScene(QGraphicsScene):
         return group, hitbox
 
     def _obtenir_vue_vehicule(self, entite: EntitePhysique) -> tuple[QGraphicsRectItem, QGraphicsRectItem]:
-        """Récupère une vue depuis le pool ou en instancie une nouvelle."""
+        """Récupère une vue depuis le pool ou en instancie une nouvelle.
+
+        Args:
+            entite (EntitePhysique): Entité mobile à représenter.
+
+        Returns:
+            tuple[QGraphicsRectItem, QGraphicsRectItem]: (groupe_graphique, hitbox).
+        """
         pool = self.pool_vehicules.setdefault(entite.type_entite, [])
         if pool:
             vue = pool.pop()
@@ -923,7 +1056,14 @@ class CarrefourScene(QGraphicsScene):
         return self._create_vehicle_view(entite)
 
     def mettre_a_jour_entites(self, entites: list, inter: IntersectionManager, id_selectionne: str | None = None):
-        """Met à jour l'ensemble des éléments dynamiques et le HUD sur la scène."""
+        """Met à jour l'ensemble des éléments dynamiques et le HUD sur la scène.
+
+        Args:
+            entites (list): Liste d'instantanés d'entités physiques reçues du moteur.
+            inter (IntersectionManager): Instance d'état courant des feux de l'intersection.
+            id_selectionne (str | None, optional): Identifiant de l'entité actuellement sélectionnée.
+                Par défaut None.
+        """
         try:
             self.tick_lumiere = (self.tick_lumiere + 1) % 60
 
@@ -1223,17 +1363,23 @@ class CarrefourScene(QGraphicsScene):
         if getattr(self, "hologramme", None) is not None:
             try:
                 self.removeItem(self.hologramme)
-                if not sip.isdeleted(self.hologramme):
-                    sip.delete(self.hologramme)
             except Exception:
                 pass
+            del self.hologramme
             self.hologramme = None
             self.type_hologramme = None
 
     def mouseMoveEvent(self, event: QGraphicsSceneMouseEvent):
-        """Gère le survol de la souris pour actualiser le gabarit de prévisualisation Cyber-SCADA."""
+        """Gère le survol de la souris pour actualiser le gabarit de prévisualisation Cyber-SCADA.
+
+        Args:
+            event (QGraphicsSceneMouseEvent): Événement de déplacement souris sur la scène.
+        """
         try:
-            super().mouseMoveEvent(event)
+            try:
+                super().mouseMoveEvent(event)
+            except TypeError:
+                pass
             fenetre = getattr(self, "main_window", None) or self.parent()
             if not fenetre or not hasattr(fenetre, "type_a_placer"):
                 return
@@ -1343,38 +1489,88 @@ class CarrefourScene(QGraphicsScene):
             logger.error(f"[CarrefourScene] Erreur mouseMoveEvent: {e}", exc_info=True)
 
     def mousePressEvent(self, event: QGraphicsSceneMouseEvent):
-        """Gère les clics sur feux tricolores, antenne RSU, usagers ou chaussée libre."""
+        """Gère les clics sur feux tricolores, antenne RSU, usagers ou chaussée libre.
+
+        Priorité absolue au placement manuel ou à l'annulation si un type d'entité est sélectionné.
+
+        Args:
+            event (QGraphicsSceneMouseEvent): Événement de clic souris sur la scène.
+
+        Returns:
+            None
+        """
         try:
-            pos = event.scenePos()
+            # 0. Priorité absolue au placement ou à l'annulation du mode placement
+            fenetre = getattr(self, "main_window", None)
+            if fenetre is None and callable(getattr(self, "parent", None)):
+                fenetre = self.parent()
+            if fenetre is None and hasattr(self, "views") and self.views():
+                vue = self.views()[0]
+                fenetre = getattr(vue, "main_window", None) or (vue.parent() if callable(getattr(vue, "parent", None)) else None)
+            type_actif = getattr(fenetre, "type_a_placer", None)
+
+            if type_actif is not None:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    echelle = getattr(self, "echelle", getattr(self, "SCALE", self.PIXELS_PAR_METRE))
+                    scene_pos = getattr(event, "scenePos", None)
+                    if callable(scene_pos):
+                        sp = scene_pos()
+                        x_px, y_px = sp.x(), sp.y()
+                    elif hasattr(event, "pos"):
+                        p = event.pos()
+                        x_px, y_px = p.x(), p.y()
+                    else:
+                        x_px, y_px = 0.0, 0.0
+                    x_m = x_px / echelle
+                    y_m = y_px / echelle
+                    self.signal_clic_vide.emit(x_m, y_m)
+                    event.accept()
+                    return
+                elif event.button() == Qt.MouseButton.RightButton:
+                    if hasattr(fenetre, "set_type_a_placer"):
+                        fenetre.set_type_a_placer(None)
+                    self.supprimer_hologramme()
+                    event.accept()
+                    return
+
+            scene_pos_val = getattr(event, "scenePos", None)
+            pos = scene_pos_val() if callable(scene_pos_val) else (event.pos() if hasattr(event, "pos") else QPointF(0, 0))
             items_cliques = self.items(pos)
 
-            # 1. Vérification clic sur feux tricolores
-            for it in items_cliques:
-                if hasattr(self, "feux_ns_items") and it in self.feux_ns_items:
-                    self.signal_forcer_feux_ns.emit()
-                    event.accept()
-                    return
-                if hasattr(self, "feux_eo_items") and it in self.feux_eo_items:
-                    self.signal_forcer_feux_eo.emit()
-                    event.accept()
-                    return
-                if hasattr(self, "rsu_items") and it in self.rsu_items:
-                    self.signal_toggle_preemption_v2i.emit()
+            # Clics interactifs uniquement sur le bouton gauche
+            if event.button() == Qt.MouseButton.LeftButton:
+                # 1. Vérification clic sur feux tricolores
+                for it in items_cliques:
+                    if hasattr(self, "feux_ns_items") and it in self.feux_ns_items:
+                        self.signal_forcer_feux_ns.emit()
+                        event.accept()
+                        return
+                    if hasattr(self, "feux_eo_items") and it in self.feux_eo_items:
+                        self.signal_forcer_feux_eo.emit()
+                        event.accept()
+                        return
+                    if hasattr(self, "rsu_items") and it in self.rsu_items:
+                        self.signal_toggle_preemption_v2i.emit()
+                        event.accept()
+                        return
+
+                # 2. Vérification clic sur véhicule mobile
+                mobile_item = next((it for it in items_cliques if it.data(0) == "mobile" and it.data(1)), None)
+                if mobile_item:
+                    self.signal_entite_selectionnee.emit(mobile_item.data(1))
                     event.accept()
                     return
 
-            # 2. Vérification clic sur véhicule mobile
-            mobile_item = next((it for it in items_cliques if it.data(0) == "mobile" and it.data(1)), None)
-            if mobile_item:
-                self.signal_entite_selectionnee.emit(mobile_item.data(1))
-                event.accept()
-                return
+                # 3. Clic sur chaussée libre
+                echelle = getattr(self, "echelle", getattr(self, "SCALE", self.PIXELS_PAR_METRE))
+                m_x = pos.x() / echelle
+                m_y = pos.y() / echelle
+                self.signal_clic_vide.emit(m_x, m_y)
 
-            # 3. Clic sur chaussée libre (spawn ou désélection)
-            m_x = pos.x() / self.PIXELS_PAR_METRE
-            m_y = pos.y() / self.PIXELS_PAR_METRE
-            self.signal_clic_vide.emit(m_x, m_y)
-            super().mousePressEvent(event)
+            try:
+                super().mousePressEvent(event)
+            except TypeError:
+                pass
 
         except Exception as e:
             logger.error(f"[CarrefourScene] Erreur mousePressEvent: {e}", exc_info=True)

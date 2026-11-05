@@ -1,10 +1,23 @@
-"""Module de régulation et de gestion automatisée des feux tricolores du carrefour.
+"""Module de régulation et de gestion automatisée des feux tricolores — Projet Esk-2718.
 
-Ce module gère le phasage cyclique des feux de signalisation pour réguler
-les flux de circulation orthogonaux (axe Nord-Sud et axe Est-Ouest).
-Il supporte le mode automatique (cycle à 6 phases avec temps de dégagement et
-sécurité tout-rouge), le forçage manuel par l'opérateur et la préemption prioritaire
-d'urgence pour les véhicules d'intervention d'urgence (VTA).
+Rôle architectural :
+    Automate à états finis pilotant le carrefour à feux tricolores synchronisés.
+    Ce module orchestre le phasage cyclique des feux de signalisation pour réguler
+    les flux orthogonaux (axe Nord-Sud et axe Est-Ouest). Il supporte le cycle nominal
+    à 6 phases (avec phases tout-rouge d'évacuation de 1.5s), le forçage manuel opérateur,
+    l'optimisation adaptative (Smart Traffic) et la préemption d'urgence prioritaire.
+
+Conformité Thread-Safety :
+    L'état de l'intersection est manipulé par le régulateur (`ServerNode`) ou le moteur
+    physique (`MoteurSimulation`). La cohérence des lectures concurrentes est garantie soit
+    par copie immuable transmise par signaux Qt (`pyqtSignal`), soit sous verrouillage mutex
+    dans les sections critiques du moteur.
+
+Conformité V2X / V2I :
+    Cœur décisionnel de la préemption d'urgence V2I. Dès réception d'un datagramme d'alerte
+    prioritaire VTA (ambulance, police, pompiers), l'automate bascule immédiatement l'axe
+    concerné au VERT prioritaire et impose le ROUGE d'exclusion sur l'axe orthogonal,
+    garantissant un franchissement sécurisé sans collision.
 """
 
 import logging
@@ -50,6 +63,12 @@ class IntersectionManager:
 
         Par défaut, la simulation commence en phase 0 : axe Nord-Sud au Vert,
         axe Est-Ouest au Rouge.
+
+        Args:
+            duree_vert (float, optional): Durée nominale de la phase verte en secondes.
+                Par défaut 12.0.
+            duree_orange (float, optional): Durée nominale de la phase orange en secondes.
+                Par défaut 3.0.
         """
         self.__feu_ns = CouleurFeu.VERT
         self.__feu_eo = CouleurFeu.ROUGE
@@ -89,7 +108,11 @@ class IntersectionManager:
 
     @property
     def temps_restant_phase(self) -> float:
-        """Calcule le temps restant en secondes dans la phase courante."""
+        """Calcule le temps restant en secondes dans la phase courante.
+
+        Returns:
+            float: Temps restant en secondes avant la transition suivante.
+        """
         if self.__urgence_active:
             return 0.0
         if self.__mode_manuel:
@@ -99,38 +122,74 @@ class IntersectionManager:
 
     @property
     def timer(self) -> float:
-        """Temps écoulé dans la phase courante."""
+        """Temps écoulé dans la phase courante.
+
+        Returns:
+            float: Secondes accumulées dans la phase actuelle.
+        """
         return self.__timer
 
     @timer.setter
     def timer(self, val: float):
+        """Définit la valeur de l'accumulateur temporel de phase.
+
+        Args:
+            val (float): Durée accumulée en secondes.
+        """
         self.__timer = float(val)
 
     @property
     def etat_cycle(self) -> int:
-        """Index de la phase courante (0 à 5)."""
+        """Index de la phase courante (0 à 5).
+
+        Returns:
+            int: Indice de phase dans le cycle de 6 phases.
+        """
         return self.__etat_cycle
 
     @etat_cycle.setter
     def etat_cycle(self, val: int):
+        """Définit l'index de phase courante dans le cycle nominal.
+
+        Args:
+            val (int): Index de phase (0 à 5).
+        """
         self.__etat_cycle = int(val)
 
     @property
     def urgence_active(self) -> bool:
-        """Indicateur de préemption d'urgence active pour véhicule prioritaire."""
+        """Indicateur de préemption d'urgence active pour véhicule prioritaire.
+
+        Returns:
+            bool: True si une préemption prioritaire VTA est en cours.
+        """
         return self.__urgence_active
 
     @urgence_active.setter
     def urgence_active(self, val: bool):
+        """Active ou désactive le mode de préemption d'urgence.
+
+        Args:
+            val (bool): État de préemption VTA.
+        """
         self.__urgence_active = bool(val)
 
     @property
     def mode_manuel(self) -> bool:
-        """Indicateur de mode manuel actif."""
+        """Indicateur de mode manuel actif.
+
+        Returns:
+            bool: True si l'opérateur a forcé manuellement l'état des feux.
+        """
         return self.__mode_manuel
 
     @mode_manuel.setter
     def mode_manuel(self, val: bool):
+        """Active ou désactive l'écrasement manuel des feux par l'opérateur.
+
+        Args:
+            val (bool): État du forçage manuel.
+        """
         self.__mode_manuel = bool(val)
 
     def optimiser_phase_adaptative(self, entites: list):

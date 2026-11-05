@@ -1,11 +1,22 @@
-"""Modélisation cinématique et dynamique des entités mobiles du carrefour.
+"""Modélisation cinématique et dynamique des entités mobiles — Projet Esk-2718.
 
-Ce module implémente la hiérarchie des entités mobiles (véhicules motorisés,
-poids lourds, convois exceptionnels, véhicules d'urgence VTA/VTI, cyclistes et piétons).
-Les entités sont régies par les lois du modèle cinématique d'Euler et subissent
-les forces aérodynamiques, la résistance au roulement ainsi que les commandes
-d'accélération et de braquage.
-L'encapsulation est assurée de manière stricte via des propriétés (@property).
+Rôle architectural :
+    Hiérarchie des entités mobiles circulant sur le carrefour (voitures, poids lourds,
+    convois exceptionnels, véhicules prioritaires VTA/VTI, cyclistes et piétons).
+    Chaque entité intègre le modèle cinématique d'Euler, la résistance aérodynamique (Cx),
+    les forces de roulement, les commandes de braquage et l'asservissement sur voies.
+
+Conformité Thread-Safety :
+    Les attributs internes des entités sont strictement encapsulés par des accesseurs
+    (`@property`). Les instances mutables ne sont manipulées que par le fil physique
+    `MoteurSimulation`. L'interface graphique reçoit exclusivement des instantanés
+    immuables `EntiteSnapshot` transmis par signaux Qt (`pyqtSignal`), prévenant
+    toute condition de course.
+
+Conformité V2X / V2I :
+    Les véhicules d'intervention d'urgence (`TypeVehicule.VIG_VTA`) constituent la source
+    des messages prioritaires V2I/V2X. Ils bénéficient de couloirs de dépassement centraux
+    dédiés et déclenchent l'asservissement des feux tricolores lors de leur détection.
 """
 
 import logging

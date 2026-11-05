@@ -1,9 +1,22 @@
-"""Point d'entrée principal du serveur de carrefour intelligent Esk-2718.
+"""Module principal du serveur SCADA et régulateur de carrefour — Projet Esk-2718.
 
-Ce script lance le nœud serveur (ServerNode) qui orchestre la régulation des feux,
-le multiplexage des connexions TCP/UDP, et l'enregistrement des métriques en BDD.
-Il prend en charge la surcharge des paramètres réseau en ligne de commande (CLI),
-la capture des crashs fatals et un tableau de bord console structuré.
+Rôle architectural :
+    Point d'entrée du serveur central de régulation et de supervision SCADA.
+    Ce module initialise et supervise le nœud serveur (`ServerNode`), qui orchestre
+    l'automate d'intersection des feux tricolores, le multiplexage réseau non-bloquant
+    et l'enregistrement des séries temporelles en base SQLite.
+
+Conformité Thread-Safety :
+    Conçu pour une exécution multi-threadée robuste sans risque de blocage ni corruption.
+    La synchronisation entre le thread principal de console, le thread d'arrière-plan
+    de supervision (`Thread-Supervision`) et les boucles réseau du `ServerNode` est assurée
+    via des primitives standard de concurrence (`threading.Event`, verrous d'exclusion mutuelle).
+
+Conformité V2X / V2I :
+    Assure le rôle de chef d'orchestre des communications coopératives V2X / V2I.
+    Il réceptionne et valide les alertes d'urgence VTA émises par les véhicules prioritaires
+    via datagrammes UDP (port 5001), et distribue l'état temps réel des feux tricolores et
+    les métriques de trafic aux postes clients connectés en TCP (port 5000).
 """
 
 import sys
@@ -247,7 +260,11 @@ def supervision_loop(server: ServerNode, stop_event: threading.Event):
 
 
 def main():
-    """Fonction principale orchestrant le démarrage et le cycle de vie du serveur."""
+    """Fonction principale orchestrant le démarrage et le cycle de vie du serveur.
+
+    Returns:
+        int: Code de retour du processus (0 si arrêt propre réussi, 1 en cas d'erreur critique).
+    """
     logger.info("=== Démarrage de l'Application Serveur Esk-2718 ===")
 
     # 1. Analyse des arguments de la ligne de commande (sans argparse)

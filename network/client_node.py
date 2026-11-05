@@ -1,9 +1,21 @@
-"""Module de communication réseau côté client pour la simulation de carrefour.
+"""Module de communication réseau côté client et interface V2X / V2I — Projet Esk-2718.
 
-Ce module implémente le nœud client (ClientNode) exécuté dans un thread Qt (QThread).
-Il assure la connexion persistante TCP avec le serveur, l'envoi de métriques et le
-relais rapide des alertes d'urgence VTA par datagrammes UDP, tout en garantissant
-une stricte thread-safety via les signaux PyQt6.
+Rôle architectural :
+    Nœud client réseau (`ClientNode`) exécuté dans un fil dédié `QThread`.
+    Gère la connexion persistante TCP avec le serveur SCADA, le multiplexage non-bloquant
+    des flux entrants/sortants, la transmission continue des métriques de circulation et
+    l'émission instantanée des alertes V2I de véhicules prioritaires (VTA) en UDP.
+
+Conformité Thread-Safety :
+    Respect absolu de la règle d'or Qt : toutes les communications vers l'interface
+    graphique s'effectuent par émission de signaux `pyqtSignal` (`etat_recu`, `metriques_recues`,
+    `trame_recue`, `connexion_changee`, etc.) sans jamais toucher aux widgets Qt directement.
+    Les files de messages internes sont protégées contre les accès concurrents.
+
+Conformité V2X / V2I :
+    Implémente les spécifications protocolaires de la SAÉ 3.02 :
+    - Canal UDP (port 5001) : émission sans latence des alertes VTA prioritaire (`vta_alert`, `vta_end`).
+    - Canal TCP (port 5000) : cadrage déterministe par délimiteur `\n`, encapsulation binaire `struct.pack('!4sBII', ...)`.
 """
 
 import socket
@@ -35,12 +47,26 @@ CODE_TO_FRAME_TYPE = {v: k for k, v in FRAME_TYPE_TO_CODE.items()}
 
 
 def code_pour_type_trame(frame_type: str) -> int:
-    """Retourne le code numérique 1 octet associé à un type de trame."""
+    """Retourne le code numérique 1 octet associé à un type de trame.
+
+    Args:
+        frame_type (str): Nom textuel du type de trame (ex: 'vta_alert', 'metrics').
+
+    Returns:
+        int: Code numérique uint8 (1 à 8, ou 0 si inconnu).
+    """
     return FRAME_TYPE_TO_CODE.get(str(frame_type).lower(), 0)
 
 
 def type_trame_pour_code(code: int) -> str:
-    """Retourne le libellé textuel associé à un code type de trame binaire."""
+    """Retourne le libellé textuel associé à un code type de trame binaire.
+
+    Args:
+        code (int): Code numérique uint8 de la trame.
+
+    Returns:
+        str: Libellé textuel correspondant, ou 'inconnu'.
+    """
     return CODE_TO_FRAME_TYPE.get(code, "inconnu")
 
 
@@ -61,6 +87,9 @@ def packager_entete_binaire(frame_type_code: int, seq: int, payload_bytes: bytes
     Returns:
         bytes: En-tête binaire de 13 octets.
     """
+    # ENCAPSULATION BINAIRE STANDARDISÉE :
+    # struct.pack avec '!4sBII' applique l'ordre réseau big-endian (RFC 1700),
+    # fournissant un en-tête compact de 13 octets avec un magic number 'ESK2' de validation.
     return struct.pack("!4sBII", b"ESK2", int(frame_type_code), int(seq), len(payload_bytes))
 
 
@@ -167,7 +196,11 @@ class ClientNode(QThread):
 
     @property
     def serveur_connecte(self) -> bool:
-        """Indique si la connexion TCP au serveur SCADA est active."""
+        """Indique si la connexion TCP au serveur SCADA est active.
+
+        Returns:
+            bool: True si la socket TCP est connectée au serveur, False sinon.
+        """
         return bool(self.connected)
 
     def _initialiser_socket_udp(self):
@@ -191,23 +224,11 @@ class ClientNode(QThread):
 
             self.udp_sock.setblocking(False)
 
+            # Désactivation de WSAECONNRESET sous Windows via la socket native (sans ctypes)
             if hasattr(socket, "SIO_UDP_CONNRESET"):
                 try:
                     self.udp_sock.ioctl(socket.SIO_UDP_CONNRESET, False)
-                except Exception:
-                    pass
-            if sys.platform == "win32":
-                try:
-                    import ctypes
-                    in_val = ctypes.c_ulong(0)
-                    cb = ctypes.c_ulong(0)
-                    # SIO_UDP_CONNRESET = 0x9800000C (désactivation WSAECONNRESET sous Windows)
-                    ctypes.windll.ws2_32.WSAIoctl(
-                        self.udp_sock.fileno(), 0x9800000C,
-                        ctypes.byref(in_val), ctypes.sizeof(in_val),
-                        None, 0, ctypes.byref(cb), None, None
-                    )
-                except Exception:
+                except OSError:
                     pass
         except Exception as e:
             logger.error(f"[ClientNode] Échec de la création de la socket UDP : {e}", exc_info=True)
@@ -384,7 +405,9 @@ class ClientNode(QThread):
                         time.sleep(0.05)
                         continue
 
-                    # Multiplexage non bloquant via select (50ms)
+                    # MULTIPLEXAGE SYNCHRONE NON-BLOQUANT VIA SELECT :
+                    # select.select() surveille simultanément les sockets TCP et UDP sans attente
+                    # active (busy waiting) avec un timeout de 50 ms pour réactivité maximale.
                     try:
                         readable, _, exceptional = select.select(sockets_to_watch, [], sockets_to_watch, 0.05)
                     except (OSError, ValueError, TypeError, select.error) as select_err:
@@ -504,6 +527,10 @@ class ClientNode(QThread):
                 self.tcp_buffer.clear()
                 return
 
+            # CADRAGE APPLICATIF TCP PAR DÉLIMITEUR '\n' :
+            # TCP étant un protocole orienté flux continu d'octets sans délimitation de trames,
+            # les messages peuvent arriver morcelés ou concaténés. La recherche de b'\n'
+            # garantit l'extraction déterministe d'un objet JSON complet avant parsing.
             while b"\n" in self.tcp_buffer:
                 idx = self.tcp_buffer.find(b"\n")
                 raw_line = bytes(self.tcp_buffer[:idx])

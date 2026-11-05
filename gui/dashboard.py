@@ -1,10 +1,23 @@
-"""Panneau latéral de contrôle et tableau de bord statistique Cyber-SCADA pour Esk-2718.
+"""Panneau latéral de contrôle et tableau de bord statistique Cyber-SCADA — Projet Esk-2718.
 
-Fournit l'ensemble des commandes de simulation (météo, feux tricolores, insertion d'usagers,
-sélection de scénarios) ainsi que la restitution statistique en temps réel
-(cartes KPIs 2x2 permanentes, 3 onglets compacts, inspection usager avec barres de progression,
-courbes pyqtgraph et persistance SQLite relationnelle).
-Conforme aux spécifications de la SAÉ 3.02 (Esk-2718).
+Rôle architectural :
+    Poste de supervision et de télémétrie de l'opérateur SCADA.
+    Fournit l'ensemble des commandes de simulation (météo, feux tricolores, insertion d'usagers,
+    sélection de scénarios) ainsi que la restitution statistique en temps réel
+    (cartes KPIs 2x2 permanentes, 3 onglets compacts, inspection usager avec barres de progression,
+    courbes `pyqtgraph` et persistance SQLite relationnelle).
+
+Conformité Thread-Safety :
+    Respect absolu de la règle d'or Qt : toutes les opérations sur les widgets du tableau de bord
+    sont exécutées exclusivement sur le fil principal de rendu GUI.
+    Les mises à jour issues du `MoteurSimulation` et du `ClientNode` sont reçues via des slots
+    connectés à des `pyqtSignal`, sans jamais invoquer de méthode graphique depuis un thread externe.
+
+Conformité V2X / V2I :
+    Intègre les outils de diagnostic et de contrôle des échanges coopératifs :
+    - Moniteur de trames temps réel « Mini-Wireshark » décodant les en-têtes binaires `struct` (`!4sBII`).
+    - Compteurs de paquets TCP / UDP et indicateur d'état de liaison avec le serveur SCADA.
+    - Déclenchement et supervision de la préemption prioritaire V2I pour les véhicules d'urgence VTA.
 """
 
 import logging
@@ -391,6 +404,17 @@ class DashboardPanel(QWidget):
 
         # Helper pour créer une carte KPI Cyber-SCADA
         def creer_carte_kpi(titre: str, val_widget: QLabel, sub_widget: QLabel, bg_color="#181A20"):
+            """Construit un composant de carte métrique KPI Cyber-SCADA avec bordure et sous-titre.
+
+            Args:
+                titre (str): Libellé descriptif du KPI.
+                val_widget (QLabel): Widget affichant la valeur dynamique principale.
+                sub_widget (QLabel): Widget affichant l'unité ou la tendance secondaire.
+                bg_color (str, optional): Couleur hexadécimale de fond. Par défaut "#181A20".
+
+            Returns:
+                QFrame: Cadre stylisé contenant les labels agencés verticalement.
+            """
             carte = QFrame()
             carte.setStyleSheet(f"""
                 QFrame {{
@@ -939,7 +963,14 @@ class DashboardPanel(QWidget):
         pos_x: float = 0.0,
         pos_y: float = 0.0,
     ):
-        """Enregistre un événement discret en BDD en garantissant l'existence d'une simulation active."""
+        """Enregistre un événement discret en BDD en garantissant l'existence d'une simulation active.
+
+        Args:
+            type_evt (str): Type ou catégorie de l'événement (ex: 'METEO', 'ALERTE_VTA').
+            description (str): Description détaillée de l'événement.
+            pos_x (float, optional): Coordonnée spatiale X associée (m). Par défaut 0.0.
+            pos_y (float, optional): Coordonnée spatiale Y associée (m). Par défaut 0.0.
+        """
         try:
             if self.simulation_id is None:
                 scen = self.combo_scenario.currentText()
@@ -951,7 +982,11 @@ class DashboardPanel(QWidget):
             logger.error(f"Erreur enregistrement événement: {e}", exc_info=True)
 
     def _sur_changement_meteo(self, meteo: str):
-        """Enregistre l'événement de changement de météo."""
+        """Enregistre l'événement de changement de météo.
+
+        Args:
+            meteo (str): Libellé des nouvelles conditions météorologiques.
+        """
         self._enregistrer_evt("METEO", f"Météo passée à '{meteo}'")
 
     def _sur_spawn_vta(self):
@@ -993,7 +1028,11 @@ class DashboardPanel(QWidget):
             logger.error(f"Erreur réinitialisation scénario: {e}", exc_info=True)
 
     def showEvent(self, event):
-        """Connecte automatiquement le signal de tick du moteur lors de l'affichage."""
+        """Connecte automatiquement le signal de tick du moteur lors de l'affichage.
+
+        Args:
+            event (QShowEvent): Événement d'affichage Qt du panneau de bord.
+        """
         super().showEvent(event)
         if not hasattr(self, "_connected_stats"):
             p = self.parent()
@@ -1235,7 +1274,11 @@ class DashboardPanel(QWidget):
             logger.error(f"Erreur ouverture graphiques détaillés: {e}", exc_info=True)
 
     def _sur_toggle_v2i(self, checked: bool):
-        """Notifie le moteur physique de l'état d'activation de la préemption V2I."""
+        """Notifie le moteur physique de l'état d'activation de la préemption V2I.
+
+        Args:
+            checked (bool): True si la préemption d'urgence est cochée, False sinon.
+        """
         p = self.parent()
         while p is not None:
             if hasattr(p, "moteur"):
@@ -1244,7 +1287,11 @@ class DashboardPanel(QWidget):
             p = p.parent()
 
     def set_serveur_connecte(self, connecte: bool):
-        """Met à jour l'indicateur visuel de connexion au serveur SCADA."""
+        """Met à jour l'indicateur visuel de connexion au serveur SCADA.
+
+        Args:
+            connecte (bool): True si le client est connecté au serveur SCADA en TCP.
+        """
         if hasattr(self, "lbl_status_serveur"):
             if connecte:
                 self.lbl_status_serveur.setText("[ONLINE TCP/UDP] CONNECTE")
@@ -1254,7 +1301,15 @@ class DashboardPanel(QWidget):
                 self.lbl_status_serveur.setStyleSheet("color: #F59E0B; font-weight: bold; font-size: 10px;")
 
     def ajouter_log_trame(self, direction: str, proto: str, seq: int, taille: int, type_trame: str):
-        """Enregistre et affiche une trame dans le moniteur réseau Mini-Wireshark."""
+        """Enregistre et affiche une trame dans le moniteur réseau Mini-Wireshark.
+
+        Args:
+            direction (str): Direction du paquet ('TX' pour émission, 'RX' pour réception).
+            proto (str): Protocole de transport sous-jacent ('TCP' ou 'UDP').
+            seq (int): Numéro de séquence de la trame.
+            taille (int): Taille totale en octets de la charge utile binaire.
+            type_trame (str): Nom du message réseau (ex: 'vta_alert', 'metrics').
+        """
         if proto.upper() == "TCP":
             self._compteur_tcp += 1
         elif proto.upper() == "UDP":
